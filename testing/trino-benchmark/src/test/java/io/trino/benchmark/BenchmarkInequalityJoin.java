@@ -24,14 +24,12 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
+import org.testng.annotations.Test;
 
 import java.util.List;
 
+import static io.trino.jmh.Benchmarks.benchmark;
 import static java.lang.String.format;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.openjdk.jmh.annotations.Mode.AverageTime;
@@ -138,14 +136,25 @@ public class BenchmarkInequalityJoin
                 .execute("SELECT count(*) FROM t1 JOIN t2 on (t1.bucket = t2.bucket) AND t2.val2 BETWEEN t1.val1 + 1 AND t1.val1 + 5");
     }
 
+    @Test
+    public void verifyJoinBenchmark()
+    {
+        Context context = new Context();
+        try {
+            // Contrive a cheap benchmark setup for use in testing
+            context.buckets = 10;
+            context.filterOutCoefficient = 10;
+            context.setUp();
+            benchmarkJoin(context);
+        }
+        finally {
+            context.tearDown();
+        }
+    }
+
     public static void main(String[] args)
             throws RunnerException
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkInequalityJoin.class.getSimpleName() + ".*")
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkInequalityJoin.class).run();
     }
 }

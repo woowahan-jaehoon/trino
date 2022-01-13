@@ -22,7 +22,6 @@ import io.trino.spi.HostAddress;
 import io.trino.spi.Node;
 import io.trino.spi.NodeManager;
 import io.trino.spi.TrinoException;
-import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
@@ -35,7 +34,9 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableProperties;
 import io.trino.spi.connector.ConnectorViewDefinition;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.LimitApplicationResult;
+import io.trino.spi.connector.SampleApplicationResult;
 import io.trino.spi.connector.SampleType;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
@@ -43,6 +44,8 @@ import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.ViewNotFoundException;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
+import io.trino.spi.statistics.Estimate;
+import io.trino.spi.statistics.TableStatistics;
 
 import javax.annotation.concurrent.ThreadSafe;
 import javax.inject.Inject;
@@ -119,18 +122,6 @@ public class MemoryMetadata
         }
 
         verify(schemas.remove(schemaName));
-    }
-
-    @Override
-    public Optional<TrinoPrincipal> getSchemaOwner(ConnectorSession session, CatalogSchemaName schemaName)
-    {
-        return Optional.empty();
-    }
-
-    @Override
-    public Map<String, Object> getSchemaProperties(ConnectorSession session, CatalogSchemaName schemaName)
-    {
-        return ImmutableMap.of();
     }
 
     @Override
@@ -263,10 +254,10 @@ public class MemoryMetadata
     private void checkTableNotExists(SchemaTableName tableName)
     {
         if (tableIds.containsKey(tableName)) {
-            throw new TrinoException(ALREADY_EXISTS, format("Table [%s] already exists", tableName.toString()));
+            throw new TrinoException(ALREADY_EXISTS, format("Table [%s] already exists", tableName));
         }
         if (views.containsKey(tableName)) {
-            throw new TrinoException(ALREADY_EXISTS, format("View [%s] already exists", tableName.toString()));
+            throw new TrinoException(ALREADY_EXISTS, format("View [%s] already exists", tableName));
         }
     }
 
@@ -393,6 +384,18 @@ public class MemoryMetadata
     }
 
     @Override
+    public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle, Constraint constraint)
+    {
+        List<MemoryDataFragment> dataFragments = getDataFragments(((MemoryTableHandle) tableHandle).getId());
+        long rows = dataFragments.stream()
+                .mapToLong(MemoryDataFragment::getRows)
+                .sum();
+        return TableStatistics.builder()
+                .setRowCount(Estimate.of(rows))
+                .build();
+    }
+
+    @Override
     public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(ConnectorSession session, ConnectorTableHandle handle, long limit)
     {
         MemoryTableHandle table = (MemoryTableHandle) handle;
@@ -403,11 +406,12 @@ public class MemoryMetadata
 
         return Optional.of(new LimitApplicationResult<>(
                 new MemoryTableHandle(table.getId(), OptionalLong.of(limit), OptionalDouble.empty()),
+                true,
                 true));
     }
 
     @Override
-    public Optional<ConnectorTableHandle> applySample(ConnectorSession session, ConnectorTableHandle handle, SampleType sampleType, double sampleRatio)
+    public Optional<SampleApplicationResult<ConnectorTableHandle>> applySample(ConnectorSession session, ConnectorTableHandle handle, SampleType sampleType, double sampleRatio)
     {
         MemoryTableHandle table = (MemoryTableHandle) handle;
 
@@ -415,6 +419,8 @@ public class MemoryMetadata
             return Optional.empty();
         }
 
-        return Optional.of(new MemoryTableHandle(table.getId(), table.getLimit(), OptionalDouble.of(table.getSampleRatio().orElse(1) * sampleRatio)));
+        return Optional.of(new SampleApplicationResult<>(
+                new MemoryTableHandle(table.getId(), table.getLimit(), OptionalDouble.of(table.getSampleRatio().orElse(1) * sampleRatio)),
+                true));
     }
 }

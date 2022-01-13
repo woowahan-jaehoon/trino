@@ -53,6 +53,7 @@ import org.apache.kudu.client.KuduScanner;
 import org.apache.kudu.client.KuduSession;
 import org.apache.kudu.client.KuduTable;
 import org.apache.kudu.client.PartialRow;
+import org.apache.kudu.client.PartitionSchema.HashBucketSchema;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -204,8 +205,11 @@ public class KuduClientSession
 
         List<KuduScanToken> tokens = builder.build();
         ImmutableList.Builder<KuduSplit> tokenBuilder = ImmutableList.builder();
-        for (int tokenId = 0; tokenId < tokens.size(); tokenId++) {
-            tokenBuilder.add(toKuduSplit(tableHandle, tokens.get(tokenId), primaryKeyColumnCount, tokenId));
+        List<HashBucketSchema> hashBucketSchemas = table.getPartitionSchema().getHashBucketSchemas();
+        for (KuduScanToken token : tokens) {
+            List<Integer> hashBuckets = token.getTablet().getPartition().getHashBuckets();
+            int bucket = KuduBucketFunction.getBucket(hashBuckets, hashBucketSchemas);
+            tokenBuilder.add(toKuduSplit(tableHandle, token, primaryKeyColumnCount, bucket));
         }
         return tokenBuilder.build();
     }
@@ -227,7 +231,7 @@ public class KuduClientSession
             return client.openTable(rawName);
         }
         catch (KuduException e) {
-            log.debug("Error on doOpenTable: " + e, e);
+            log.debug(e, "Error on doOpenTable");
             if (!listSchemaNames().contains(schemaTableName.getSchemaName())) {
                 throw new SchemaNotFoundException(schemaTableName.getSchemaName());
             }

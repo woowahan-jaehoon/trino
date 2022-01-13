@@ -35,6 +35,7 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_NON_TRANSIENT_ERROR;
+import static io.trino.plugin.jdbc.JdbcWriteSessionProperties.getWriteBatchSize;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
@@ -46,6 +47,7 @@ public class JdbcPageSink
 
     private final List<Type> columnTypes;
     private final List<WriteFunction> columnWriters;
+    private final int maxBatchSize;
     private int batchSize;
 
     public JdbcPageSink(ConnectorSession session, JdbcOutputTableHandle handle, JdbcClient jdbcClient)
@@ -58,6 +60,11 @@ public class JdbcPageSink
         }
 
         try {
+            // According to JDBC javaodcs "If a connection is in auto-commit mode, then all its SQL statements will be
+            // executed and committed as individual transactions." Notably MySQL and SQL Server respect this which
+            // leads to multiple commits when we close the connection leading to slow performance. Explicit commits
+            // where needed ensure that all of the submitted statements are committed as a single transaction and
+            // performs better.
             connection.setAutoCommit(false);
         }
         catch (SQLException e) {
@@ -98,6 +105,9 @@ public class JdbcPageSink
             closeWithSuppression(connection, e);
             throw new TrinoException(JDBC_ERROR, e);
         }
+
+        // Making batch size configurable allows performance tuning for insert/write-heavy workloads over multiple connections.
+        this.maxBatchSize = getWriteBatchSize(session);
     }
 
     @Override
@@ -112,7 +122,7 @@ public class JdbcPageSink
                 statement.addBatch();
                 batchSize++;
 
-                if (batchSize >= 1000) {
+                if (batchSize >= maxBatchSize) {
                     statement.executeBatch();
                     connection.commit();
                     connection.setAutoCommit(false);

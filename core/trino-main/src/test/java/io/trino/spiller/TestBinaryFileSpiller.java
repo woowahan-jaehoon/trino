@@ -14,21 +14,24 @@
 package io.trino.spiller;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.io.Files;
+import io.trino.FeaturesConfig;
 import io.trino.RowPagesBuilder;
 import io.trino.execution.buffer.PagesSerde;
 import io.trino.execution.buffer.PagesSerdeFactory;
 import io.trino.memory.context.AggregatedMemoryContext;
-import io.trino.metadata.Metadata;
 import io.trino.spi.Page;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.BlockEncodingSerde;
+import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.Type;
-import io.trino.sql.analyzer.FeaturesConfig;
 import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -36,7 +39,6 @@ import java.util.concurrent.ExecutionException;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.operator.PageAssertions.assertPageEquals;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -50,25 +52,32 @@ public class TestBinaryFileSpiller
 {
     private static final List<Type> TYPES = ImmutableList.of(BIGINT, VARCHAR, DOUBLE, BIGINT);
 
-    private final File spillPath = Files.createTempDir();
+    private File spillPath;
     private SpillerStats spillerStats;
     private FileSingleStreamSpillerFactory singleStreamSpillerFactory;
     private SpillerFactory factory;
     private PagesSerde pagesSerde;
     private AggregatedMemoryContext memoryContext;
 
+    @BeforeClass(alwaysRun = true)
+    public void setUpClass()
+            throws IOException
+    {
+        spillPath = Files.createTempDirectory("tmp").toFile();
+    }
+
     @BeforeMethod
     public void setUp()
     {
-        Metadata metadata = createTestMetadataManager();
         spillerStats = new SpillerStats();
         FeaturesConfig featuresConfig = new FeaturesConfig();
         featuresConfig.setSpillerSpillPaths(spillPath.getAbsolutePath());
         featuresConfig.setSpillMaxUsedSpaceThreshold(1.0);
         NodeSpillConfig nodeSpillConfig = new NodeSpillConfig();
-        singleStreamSpillerFactory = new FileSingleStreamSpillerFactory(metadata, spillerStats, featuresConfig, nodeSpillConfig);
+        BlockEncodingSerde blockEncodingSerde = new TestingBlockEncodingSerde();
+        singleStreamSpillerFactory = new FileSingleStreamSpillerFactory(blockEncodingSerde, spillerStats, featuresConfig, nodeSpillConfig);
         factory = new GenericSpillerFactory(singleStreamSpillerFactory);
-        PagesSerdeFactory pagesSerdeFactory = new PagesSerdeFactory(metadata.getBlockEncodingSerde(), nodeSpillConfig.isSpillCompressionEnabled());
+        PagesSerdeFactory pagesSerdeFactory = new PagesSerdeFactory(blockEncodingSerde, nodeSpillConfig.isSpillCompressionEnabled());
         pagesSerde = pagesSerdeFactory.createPagesSerde();
         memoryContext = newSimpleAggregatedMemoryContext();
     }

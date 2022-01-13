@@ -16,22 +16,31 @@ package io.trino.plugin.phoenix5;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import io.airlift.configuration.Config;
+import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.validation.FileExists;
-import io.airlift.units.Duration;
-import io.airlift.units.MinDuration;
 
+import javax.validation.constraints.Max;
+import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
 
 import java.util.List;
 
-import static java.util.concurrent.TimeUnit.MINUTES;
-
 public class PhoenixConfig
 {
+    static final int MAX_ALLOWED_SCANS_PER_SPLIT = 1000;
+
     private String connectionUrl;
     private List<String> resourceConfigFiles = ImmutableList.of();
-    private boolean caseInsensitiveNameMatching;
-    private Duration caseInsensitiveNameMatchingCacheTtl = new Duration(1, MINUTES);
+
+    /*
+     * By default group at most 20 HBase scans into a single Split.
+     * There is at least one Split per HBase region, HBase's default region size is 20GB
+     * and Phoenix' default scan chunk size is 300MB.
+     * Any value between 10 and perhaps 30 is a good default. 20 is a good compromise allowing
+     * 3-4 parallel scans per region with all default settings.
+     * A large value here makes sense when the Guidepost-width in Phoenix has been reduced.
+     */
+    private int maxScansPerSplit = 20;
 
     @NotNull
     public String getConnectionUrl()
@@ -59,29 +68,18 @@ public class PhoenixConfig
         return this;
     }
 
-    public boolean isCaseInsensitiveNameMatching()
+    @Min(1)
+    @Max(MAX_ALLOWED_SCANS_PER_SPLIT)
+    public int getMaxScansPerSplit()
     {
-        return caseInsensitiveNameMatching;
+        return maxScansPerSplit;
     }
 
-    @Config("case-insensitive-name-matching")
-    public PhoenixConfig setCaseInsensitiveNameMatching(boolean caseInsensitiveNameMatching)
+    @Config("phoenix.max-scans-per-split")
+    @ConfigDescription("Maximum number of HBase scans that will be performed in a single split.")
+    public PhoenixConfig setMaxScansPerSplit(int scansPerSplit)
     {
-        this.caseInsensitiveNameMatching = caseInsensitiveNameMatching;
-        return this;
-    }
-
-    @NotNull
-    @MinDuration("0ms")
-    public Duration getCaseInsensitiveNameMatchingCacheTtl()
-    {
-        return caseInsensitiveNameMatchingCacheTtl;
-    }
-
-    @Config("case-insensitive-name-matching.cache-ttl")
-    public PhoenixConfig setCaseInsensitiveNameMatchingCacheTtl(Duration caseInsensitiveNameMatchingCacheTtl)
-    {
-        this.caseInsensitiveNameMatchingCacheTtl = caseInsensitiveNameMatchingCacheTtl;
+        this.maxScansPerSplit = scansPerSplit;
         return this;
     }
 }

@@ -15,20 +15,20 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableBiMap;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.spi.type.TypeOperators;
+import io.trino.spi.type.Type;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeProvider;
+import io.trino.sql.planner.SymbolAllocator;
+import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.PlanNode;
@@ -38,8 +38,8 @@ import io.trino.sql.tree.Expression;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkState;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.ExpressionUtils.filterDeterministicConjuncts;
 import static io.trino.sql.ExpressionUtils.filterNonDeterministicConjuncts;
@@ -59,15 +59,13 @@ public class RemoveRedundantTableScanPredicate
             filter().with(source().matching(
                     tableScan().capturedAs(TABLE_SCAN)));
 
-    private final Metadata metadata;
-    private final DomainTranslator domainTranslator;
-    private final TypeOperators typeOperators;
+    private final PlannerContext plannerContext;
+    private final TypeAnalyzer typeAnalyzer;
 
-    public RemoveRedundantTableScanPredicate(Metadata metadata, TypeOperators typeOperators)
+    public RemoveRedundantTableScanPredicate(PlannerContext plannerContext, TypeAnalyzer typeAnalyzer)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
-        this.domainTranslator = new DomainTranslator(metadata);
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
+        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
     }
 
     @Override
@@ -85,9 +83,8 @@ public class RemoveRedundantTableScanPredicate
                 tableScan,
                 filterNode.getPredicate(),
                 context.getSession(),
-                context.getSymbolAllocator().getTypes(),
-                context.getIdAllocator(),
-                typeOperators);
+                context.getSymbolAllocator(),
+                context.getIdAllocator());
 
         if (rewritten instanceof FilterNode
                 && Objects.equals(((FilterNode) rewritten).getPredicate(), filterNode.getPredicate())) {
@@ -101,55 +98,52 @@ public class RemoveRedundantTableScanPredicate
             TableScanNode node,
             Expression predicate,
             Session session,
-            TypeProvider types,
-            PlanNodeIdAllocator idAllocator,
-            TypeOperators typeOperators)
+            SymbolAllocator symbolAllocator,
+            PlanNodeIdAllocator idAllocator)
     {
-        Expression deterministicPredicate = filterDeterministicConjuncts(metadata, predicate);
-        Expression nonDeterministicPredicate = filterNonDeterministicConjuncts(metadata, predicate);
+        Expression deterministicPredicate = filterDeterministicConjuncts(plannerContext.getMetadata(), predicate);
+        Expression nonDeterministicPredicate = filterNonDeterministicConjuncts(plannerContext.getMetadata(), predicate);
 
-        DomainTranslator.ExtractionResult decomposedPredicate = DomainTranslator.fromPredicate(
-                metadata,
-                typeOperators,
+        DomainTranslator.ExtractionResult decomposedPredicate = DomainTranslator.getExtractionResult(
+                plannerContext,
                 session,
                 deterministicPredicate,
-                types);
+                symbolAllocator.getTypes());
 
         TupleDomain<ColumnHandle> predicateDomain = decomposedPredicate.getTupleDomain()
-                .transform(node.getAssignments()::get);
+                .transformKeys(node.getAssignments()::get);
 
-        TupleDomain<ColumnHandle> unenforcedDomain;
-        if (predicateDomain.getDomains().isPresent()) {
-            Map<ColumnHandle, Domain> predicateColumnDomains = predicateDomain.getDomains().get();
-
-            // table scans with none domain should be converted to ValuesNode
-            checkState(node.getEnforcedConstraint().getDomains().isPresent());
-            Map<ColumnHandle, Domain> enforcedColumnDomains = node.getEnforcedConstraint().getDomains().get();
-
-            ImmutableMap.Builder<ColumnHandle, Domain> unenforcedColumnDomains = ImmutableMap.builder();
-            for (Map.Entry<ColumnHandle, Domain> entry : predicateColumnDomains.entrySet()) {
-                ColumnHandle columnHandle = entry.getKey();
-                Domain predicateColumnDomain = entry.getValue();
-                Domain enforcedColumnDomain = enforcedColumnDomains.getOrDefault(columnHandle, Domain.all(predicateColumnDomain.getType()));
-                predicateColumnDomain = predicateColumnDomain.intersect(enforcedColumnDomain);
-                if (!predicateColumnDomain.contains(enforcedColumnDomain)) {
-                    unenforcedColumnDomains.put(columnHandle, predicateColumnDomain);
-                }
-            }
-
-            unenforcedDomain = TupleDomain.withColumnDomains(unenforcedColumnDomains.build());
-        }
-        else {
+        if (predicateDomain.isNone()) {
             // TODO: DomainTranslator.fromPredicate can infer that the expression is "false" in some cases (TupleDomain.none()).
             // This should move to another rule that simplifies the filter using that logic and then rely on RemoveTrivialFilters
             // to turn the subtree into a Values node
             return new ValuesNode(node.getId(), node.getOutputSymbols(), ImmutableList.of());
         }
 
+        if (node.getEnforcedConstraint().isNone()) {
+            // table scans with none domain should be converted to ValuesNode
+            return new ValuesNode(node.getId(), node.getOutputSymbols(), ImmutableList.of());
+        }
+
+        Map<ColumnHandle, Domain> enforcedColumnDomains = node.getEnforcedConstraint().getDomains().orElseThrow(); // is not NONE
+
+        TupleDomain<ColumnHandle> unenforcedDomain = predicateDomain.transformDomains((columnHandle, predicateColumnDomain) -> {
+            Type type = predicateColumnDomain.getType();
+            Domain enforcedColumnDomain = Optional.ofNullable(enforcedColumnDomains.get(columnHandle)).orElseGet(() -> Domain.all(type));
+            if (predicateColumnDomain.contains(enforcedColumnDomain)) {
+                // full enforced
+                return Domain.all(type);
+            }
+            return predicateColumnDomain.intersect(enforcedColumnDomain);
+        });
+
         Map<ColumnHandle, Symbol> assignments = ImmutableBiMap.copyOf(node.getAssignments()).inverse();
         Expression resultingPredicate = createResultingPredicate(
-                metadata,
-                domainTranslator.toPredicate(unenforcedDomain.transform(assignments::get)),
+                plannerContext,
+                session,
+                symbolAllocator,
+                typeAnalyzer,
+                new DomainTranslator(plannerContext).toPredicate(session, unenforcedDomain.transformKeys(assignments::get)),
                 nonDeterministicPredicate,
                 decomposedPredicate.getRemainingExpression());
 

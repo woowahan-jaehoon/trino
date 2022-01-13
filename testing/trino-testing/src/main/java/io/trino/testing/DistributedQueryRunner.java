@@ -25,20 +25,27 @@ import io.trino.Session;
 import io.trino.Session.SessionBuilder;
 import io.trino.connector.CatalogName;
 import io.trino.cost.StatsCalculator;
+import io.trino.execution.FailureInjector.InjectedFailureType;
 import io.trino.execution.QueryManager;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.AllNodes;
 import io.trino.metadata.InternalNode;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.metadata.SessionPropertyManager;
 import io.trino.metadata.SqlFunction;
 import io.trino.server.BasicQueryInfo;
+import io.trino.server.SessionPropertyDefaults;
 import io.trino.server.testing.TestingTrinoServer;
+import io.trino.spi.ErrorType;
 import io.trino.spi.Plugin;
 import io.trino.spi.QueryId;
+import io.trino.spi.eventlistener.EventListener;
 import io.trino.spi.security.SystemAccessControl;
+import io.trino.spi.type.TypeManager;
 import io.trino.split.PageSourceManager;
 import io.trino.split.SplitManager;
+import io.trino.sql.analyzer.QueryExplainer;
 import io.trino.sql.planner.NodePartitioningManager;
 import io.trino.sql.planner.Plan;
 import io.trino.transaction.TransactionManager;
@@ -85,9 +92,9 @@ public class DistributedQueryRunner
 
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
 
-    public static Builder builder(Session defaultSession)
+    public static Builder<?> builder(Session defaultSession)
     {
-        return new Builder(defaultSession);
+        return new Builder<>(defaultSession);
     }
 
     private DistributedQueryRunner(
@@ -99,7 +106,8 @@ public class DistributedQueryRunner
             String environment,
             Module additionalModule,
             Optional<Path> baseDataDir,
-            List<SystemAccessControl> systemAccessControls)
+            List<SystemAccessControl> systemAccessControls,
+            List<EventListener> eventListeners)
             throws Exception
     {
         requireNonNull(defaultSession, "defaultSession is null");
@@ -124,6 +132,7 @@ public class DistributedQueryRunner
                         environment,
                         additionalModule,
                         baseDataDir,
+                        ImmutableList.of(),
                         ImmutableList.of()));
                 servers.add(worker);
             }
@@ -146,7 +155,8 @@ public class DistributedQueryRunner
                     environment,
                     additionalModule,
                     baseDataDir,
-                    systemAccessControls));
+                    systemAccessControls,
+                    eventListeners));
             servers.add(coordinator);
             if (backupCoordinatorProperties.isPresent()) {
                 Map<String, String> extraBackupCoordinatorProperties = new HashMap<>();
@@ -159,7 +169,8 @@ public class DistributedQueryRunner
                         environment,
                         additionalModule,
                         baseDataDir,
-                        systemAccessControls)));
+                        systemAccessControls,
+                        eventListeners)));
                 servers.add(backupCoordinator.get());
             }
             else {
@@ -178,7 +189,7 @@ public class DistributedQueryRunner
         }
 
         // copy session using property manager in coordinator
-        defaultSession = defaultSession.toSessionRepresentation().toSession(coordinator.getMetadata().getSessionPropertyManager(), defaultSession.getIdentity().getExtraCredentials());
+        defaultSession = defaultSession.toSessionRepresentation().toSession(coordinator.getSessionPropertyManager(), defaultSession.getIdentity().getExtraCredentials());
         this.trinoClient = closer.register(new TestingTrinoClient(coordinator, defaultSession));
 
         waitForAllNodesGloballyVisible();
@@ -197,7 +208,8 @@ public class DistributedQueryRunner
             String environment,
             Module additionalModule,
             Optional<Path> baseDataDir,
-            List<SystemAccessControl> systemAccessControls)
+            List<SystemAccessControl> systemAccessControls,
+            List<EventListener> eventListeners)
     {
         long start = System.nanoTime();
         ImmutableMap.Builder<String, String> propertiesBuilder = ImmutableMap.<String, String>builder()
@@ -232,6 +244,7 @@ public class DistributedQueryRunner
                 .setAdditionalModule(additionalModule)
                 .setBaseDataDir(baseDataDir)
                 .setSystemAccessControls(systemAccessControls)
+                .setEventListeners(eventListeners)
                 .build();
 
         String nodeRole = coordinator ? "coordinator" : "worker";
@@ -253,6 +266,7 @@ public class DistributedQueryRunner
                     ENVIRONMENT,
                     EMPTY_MODULE,
                     Optional.empty(),
+                    ImmutableList.of(),
                     ImmutableList.of()));
             serverBuilder.add(server);
             // add functions
@@ -315,6 +329,24 @@ public class DistributedQueryRunner
     }
 
     @Override
+    public TypeManager getTypeManager()
+    {
+        return coordinator.getTypeManager();
+    }
+
+    @Override
+    public QueryExplainer getQueryExplainer()
+    {
+        return coordinator.getQueryExplainer();
+    }
+
+    @Override
+    public SessionPropertyManager getSessionPropertyManager()
+    {
+        return coordinator.getSessionPropertyManager();
+    }
+
+    @Override
     public SplitManager getSplitManager()
     {
         return coordinator.getSplitManager();
@@ -348,6 +380,11 @@ public class DistributedQueryRunner
     public TestingGroupProvider getGroupProvider()
     {
         return coordinator.getGroupProvider();
+    }
+
+    public SessionPropertyDefaults getSessionPropertyDefaults()
+    {
+        return coordinator.getSessionPropertyDefaults();
     }
 
     public TestingTrinoServer getCoordinator()
@@ -515,6 +552,26 @@ public class DistributedQueryRunner
     }
 
     @Override
+    public void injectTaskFailure(
+            String traceToken,
+            int stageId,
+            int partitionId,
+            int attemptId,
+            InjectedFailureType injectionType,
+            Optional<ErrorType> errorType)
+    {
+        for (TestingTrinoServer server : servers) {
+            server.injectTaskFailure(
+                    traceToken,
+                    stageId,
+                    partitionId,
+                    attemptId,
+                    injectionType,
+                    errorType);
+        }
+    }
+
+    @Override
     public final void close()
     {
         cancelAllQueries();
@@ -553,7 +610,7 @@ public class DistributedQueryRunner
         }
     }
 
-    public static class Builder
+    public static class Builder<SELF extends Builder<?>>
     {
         private Session defaultSession;
         private int nodeCount = 3;
@@ -564,47 +621,48 @@ public class DistributedQueryRunner
         private Module additionalModule = EMPTY_MODULE;
         private Optional<Path> baseDataDir = Optional.empty();
         private List<SystemAccessControl> systemAccessControls = ImmutableList.of();
+        private List<EventListener> eventListeners = ImmutableList.of();
 
         protected Builder(Session defaultSession)
         {
             this.defaultSession = requireNonNull(defaultSession, "defaultSession is null");
         }
 
-        public Builder amendSession(Function<SessionBuilder, SessionBuilder> amendSession)
+        public SELF amendSession(Function<SessionBuilder, SessionBuilder> amendSession)
         {
             SessionBuilder builder = Session.builder(defaultSession);
             this.defaultSession = amendSession.apply(builder).build();
-            return this;
+            return self();
         }
 
-        public Builder setNodeCount(int nodeCount)
+        public SELF setNodeCount(int nodeCount)
         {
             this.nodeCount = nodeCount;
-            return this;
+            return self();
         }
 
-        public Builder setExtraProperties(Map<String, String> extraProperties)
+        public SELF setExtraProperties(Map<String, String> extraProperties)
         {
             this.extraProperties = new HashMap<>(extraProperties);
-            return this;
+            return self();
         }
 
-        public Builder addExtraProperty(String key, String value)
+        public SELF addExtraProperty(String key, String value)
         {
             this.extraProperties.put(key, value);
-            return this;
+            return self();
         }
 
-        public Builder setCoordinatorProperties(Map<String, String> coordinatorProperties)
+        public SELF setCoordinatorProperties(Map<String, String> coordinatorProperties)
         {
             this.coordinatorProperties = coordinatorProperties;
-            return this;
+            return self();
         }
 
-        public Builder setBackupCoordinatorProperties(Map<String, String> backupCoordinatorProperties)
+        public SELF setBackupCoordinatorProperties(Map<String, String> backupCoordinatorProperties)
         {
             this.backupCoordinatorProperties = Optional.of(backupCoordinatorProperties);
-            return this;
+            return self();
         }
 
         /**
@@ -612,48 +670,67 @@ public class DistributedQueryRunner
          * Note, that calling this method OVERWRITES previously set property values.
          * As a result, it should only be used when only one coordinator property needs to be set.
          */
-        public Builder setSingleCoordinatorProperty(String key, String value)
+        public SELF setSingleCoordinatorProperty(String key, String value)
         {
             return setCoordinatorProperties(ImmutableMap.of(key, value));
         }
 
-        public Builder setEnvironment(String environment)
+        public SELF setEnvironment(String environment)
         {
             this.environment = environment;
-            return this;
+            return self();
         }
 
-        public Builder setAdditionalModule(Module additionalModule)
+        public SELF setAdditionalModule(Module additionalModule)
         {
             this.additionalModule = requireNonNull(additionalModule, "additionalModules is null");
-            return this;
+            return self();
         }
 
-        public Builder setBaseDataDir(Optional<Path> baseDataDir)
+        public SELF setBaseDataDir(Optional<Path> baseDataDir)
         {
             this.baseDataDir = requireNonNull(baseDataDir, "baseDataDir is null");
-            return this;
+            return self();
         }
 
         @SuppressWarnings("unused")
-        public Builder setSystemAccessControl(SystemAccessControl systemAccessControl)
+        public SELF setSystemAccessControl(SystemAccessControl systemAccessControl)
         {
             return setSystemAccessControls(ImmutableList.of(requireNonNull(systemAccessControl, "systemAccessControl is null")));
         }
 
         @SuppressWarnings("unused")
-        public Builder setSystemAccessControls(List<SystemAccessControl> systemAccessControls)
+        public SELF setSystemAccessControls(List<SystemAccessControl> systemAccessControls)
         {
             this.systemAccessControls = ImmutableList.copyOf(requireNonNull(systemAccessControls, "systemAccessControls is null"));
-            return this;
+            return self();
         }
 
-        public Builder enableBackupCoordinator()
+        @SuppressWarnings("unused")
+        public SELF setEventListener(EventListener eventListener)
+        {
+            return setEventListeners(ImmutableList.of(requireNonNull(eventListener, "eventListener is null")));
+        }
+
+        @SuppressWarnings("unused")
+        public SELF setEventListeners(List<EventListener> eventListeners)
+        {
+            this.eventListeners = ImmutableList.copyOf(requireNonNull(eventListeners, "eventListeners is null"));
+            return self();
+        }
+
+        public SELF enableBackupCoordinator()
         {
             if (backupCoordinatorProperties.isEmpty()) {
                 setBackupCoordinatorProperties(ImmutableMap.of());
             }
-            return this;
+            return self();
+        }
+
+        @SuppressWarnings("unchecked")
+        protected SELF self()
+        {
+            return (SELF) this;
         }
 
         public DistributedQueryRunner build()
@@ -668,7 +745,8 @@ public class DistributedQueryRunner
                     environment,
                     additionalModule,
                     baseDataDir,
-                    systemAccessControls);
+                    systemAccessControls,
+                    eventListeners);
         }
     }
 }

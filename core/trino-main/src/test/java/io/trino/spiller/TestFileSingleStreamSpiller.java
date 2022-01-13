@@ -15,7 +15,6 @@ package io.trino.spiller;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
-import com.google.common.io.Files;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import io.airlift.slice.InputStreamSliceInput;
 import io.trino.execution.buffer.PageCodecMarker;
@@ -25,12 +24,16 @@ import io.trino.memory.context.LocalMemoryContext;
 import io.trino.operator.PageAssertions;
 import io.trino.spi.Page;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.Type;
 import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
 import java.util.Iterator;
 import java.util.List;
 
@@ -39,7 +42,6 @@ import static com.google.common.io.MoreFiles.listFiles;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static com.google.common.util.concurrent.MoreExecutors.listeningDecorator;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
@@ -55,7 +57,14 @@ public class TestFileSingleStreamSpiller
     private static final List<Type> TYPES = ImmutableList.of(BIGINT, DOUBLE, VARBINARY);
 
     private final ListeningExecutorService executor = listeningDecorator(newCachedThreadPool());
-    private final File spillPath = Files.createTempDir();
+    private File spillPath;
+
+    @BeforeClass(alwaysRun = true)
+    public void setUp()
+            throws IOException
+    {
+        spillPath = Files.createTempDirectory("tmp").toFile();
+    }
 
     @AfterClass(alwaysRun = true)
     public void tearDown()
@@ -98,7 +107,7 @@ public class TestFileSingleStreamSpiller
     {
         FileSingleStreamSpillerFactory spillerFactory = new FileSingleStreamSpillerFactory(
                 executor, // executor won't be closed, because we don't call destroy() on the spiller factory
-                createTestMetadataManager().getBlockEncodingSerde(),
+                new TestingBlockEncodingSerde(),
                 new SpillerStats(),
                 ImmutableList.of(spillPath.toPath()),
                 1.0,

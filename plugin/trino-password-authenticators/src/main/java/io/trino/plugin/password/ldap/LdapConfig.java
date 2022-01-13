@@ -40,9 +40,11 @@ public class LdapConfig
     private List<String> userBindSearchPatterns = ImmutableList.of();
     private String groupAuthorizationSearchPattern;
     private String userBaseDistinguishedName;
+    private String groupBaseDistinguishedName;
     private String bindDistinguishedName;
     private String bindPassword;
     private boolean ignoreReferrals;
+    private boolean allowUserNotExist;
     private Duration ldapCacheTtl = new Duration(1, TimeUnit.HOURS);
 
     @NotNull
@@ -142,6 +144,19 @@ public class LdapConfig
         return this;
     }
 
+    public String getGroupBaseDistinguishedName()
+    {
+        return groupBaseDistinguishedName;
+    }
+
+    @Config("ldap.group-base-dn")
+    @ConfigDescription("Base distinguished name of the group. Example: ou=groups,dc=example,dc=com")
+    public LdapConfig setGroupBaseDistinguishedName(String groupBaseDistinguishedName)
+    {
+        this.groupBaseDistinguishedName = groupBaseDistinguishedName;
+        return this;
+    }
+
     public String getBindDistingushedName()
     {
         return bindDistinguishedName;
@@ -179,6 +194,19 @@ public class LdapConfig
     public LdapConfig setIgnoreReferrals(boolean ignoreReferrals)
     {
         this.ignoreReferrals = ignoreReferrals;
+        return this;
+    }
+
+    public boolean isAllowUserNotExist()
+    {
+        return allowUserNotExist;
+    }
+
+    @Config("ldap.allow-user-not-exist")
+    @ConfigDescription("Didn't throw exception if user didn't exist")
+    public LdapConfig setAllowUserNotExist(boolean allowUserNotExist)
+    {
+        this.allowUserNotExist = allowUserNotExist;
         return this;
     }
 

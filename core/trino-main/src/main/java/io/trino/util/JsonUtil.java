@@ -14,6 +14,7 @@
 package io.trino.util;
 
 import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonFactoryBuilder;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -47,6 +48,7 @@ import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeSignatureParameter;
 import io.trino.spi.type.VarcharType;
 import io.trino.type.BigintOperators;
 import io.trino.type.BooleanOperators;
@@ -87,6 +89,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.VarcharType.UNBOUNDED_LENGTH;
 import static io.trino.type.DateTimes.formatTimestamp;
 import static io.trino.type.JsonType.JSON;
 import static io.trino.util.DateTimeUtils.printDate;
@@ -101,7 +104,7 @@ import static java.time.ZoneOffset.UTC;
 
 public final class JsonUtil
 {
-    public static final JsonFactory JSON_FACTORY = new JsonFactory().disable(CANONICALIZE_FIELD_NAMES);
+    public static final JsonFactory JSON_FACTORY = new JsonFactoryBuilder().disable(CANONICALIZE_FIELD_NAMES).build();
 
     // This object mapper is constructed without .configure(ORDER_MAP_ENTRIES_BY_KEYS, true) because
     // `OBJECT_MAPPER.writeValueAsString(parser.readValueAsTree());` preserves input order.
@@ -253,7 +256,7 @@ public final class JsonUtil
         void writeJsonValue(JsonGenerator jsonGenerator, Block block, int position)
                 throws IOException;
 
-        static JsonGeneratorWriter createJsonGeneratorWriter(Type type)
+        static JsonGeneratorWriter createJsonGeneratorWriter(Type type, boolean legacyRowToJson)
         {
             if (type instanceof UnknownType) {
                 return new UnknownJsonGeneratorWriter();
@@ -292,22 +295,22 @@ public final class JsonUtil
                 ArrayType arrayType = (ArrayType) type;
                 return new ArrayJsonGeneratorWriter(
                         arrayType,
-                        createJsonGeneratorWriter(arrayType.getElementType()));
+                        createJsonGeneratorWriter(arrayType.getElementType(), legacyRowToJson));
             }
             if (type instanceof MapType) {
                 MapType mapType = (MapType) type;
                 return new MapJsonGeneratorWriter(
                         mapType,
                         createObjectKeyProvider(mapType.getKeyType()),
-                        createJsonGeneratorWriter(mapType.getValueType()));
+                        createJsonGeneratorWriter(mapType.getValueType(), legacyRowToJson));
             }
             if (type instanceof RowType) {
                 List<Type> fieldTypes = type.getTypeParameters();
                 List<JsonGeneratorWriter> fieldWriters = new ArrayList<>(fieldTypes.size());
                 for (int i = 0; i < fieldTypes.size(); i++) {
-                    fieldWriters.add(createJsonGeneratorWriter(fieldTypes.get(i)));
+                    fieldWriters.add(createJsonGeneratorWriter(fieldTypes.get(i), legacyRowToJson));
                 }
-                return new RowJsonGeneratorWriter((RowType) type, fieldWriters);
+                return new RowJsonGeneratorWriter((RowType) type, fieldWriters, legacyRowToJson);
             }
 
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, format("Unsupported type: %s", type));
@@ -618,11 +621,13 @@ public final class JsonUtil
     {
         private final RowType type;
         private final List<JsonGeneratorWriter> fieldWriters;
+        private final boolean legacyRowToJson;
 
-        public RowJsonGeneratorWriter(RowType type, List<JsonGeneratorWriter> fieldWriters)
+        public RowJsonGeneratorWriter(RowType type, List<JsonGeneratorWriter> fieldWriters, boolean legacyRowToJson)
         {
             this.type = type;
             this.fieldWriters = fieldWriters;
+            this.legacyRowToJson = legacyRowToJson;
         }
 
         @Override
@@ -634,11 +639,23 @@ public final class JsonUtil
             }
             else {
                 Block rowBlock = type.getObject(block, position);
-                jsonGenerator.writeStartArray();
-                for (int i = 0; i < rowBlock.getPositionCount(); i++) {
-                    fieldWriters.get(i).writeJsonValue(jsonGenerator, rowBlock, i);
+
+                if (legacyRowToJson) {
+                    jsonGenerator.writeStartArray();
+                    for (int i = 0; i < rowBlock.getPositionCount(); i++) {
+                        fieldWriters.get(i).writeJsonValue(jsonGenerator, rowBlock, i);
+                    }
+                    jsonGenerator.writeEndArray();
                 }
-                jsonGenerator.writeEndArray();
+                else {
+                    List<TypeSignatureParameter> typeSignatureParameters = type.getTypeSignature().getParameters();
+                    jsonGenerator.writeStartObject();
+                    for (int i = 0; i < rowBlock.getPositionCount(); i++) {
+                        jsonGenerator.writeFieldName(typeSignatureParameters.get(i).getNamedTypeSignature().getName().orElse(""));
+                        fieldWriters.get(i).writeJsonValue(jsonGenerator, rowBlock, i);
+                    }
+                    jsonGenerator.writeEndObject();
+                }
             }
         }
     }
@@ -655,7 +672,7 @@ public final class JsonUtil
                 return Slices.utf8Slice(parser.getText());
             case VALUE_NUMBER_FLOAT:
                 // Avoidance of loss of precision does not seem to be possible here because of Jackson implementation.
-                return DoubleOperators.castToVarchar(parser.getDoubleValue());
+                return DoubleOperators.castToVarchar(UNBOUNDED_LENGTH, parser.getDoubleValue());
             case VALUE_NUMBER_INT:
                 // An alternative is calling getLongValue and then BigintOperators.castToVarchar.
                 // It doesn't work as well because it can result in overflow and underflow exceptions for large integral numbers.

@@ -13,10 +13,10 @@
  */
 package io.trino.operator.aggregation;
 
-import com.google.common.primitives.Ints;
-import io.trino.metadata.Metadata;
+import com.google.common.collect.ImmutableList;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.GroupByIdBlock;
-import io.trino.operator.aggregation.groupby.GroupByAggregationTestUtils;
+import io.trino.operator.aggregation.histogram.Histogram;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.sql.tree.QualifiedName;
@@ -30,25 +30,21 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.profile.GCProfiler;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.trino.block.BlockAssertions.createStringsBlock;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
-import static io.trino.operator.aggregation.histogram.Histogram.NAME;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 
 @OutputTimeUnit(TimeUnit.SECONDS)
 //@BenchmarkMode(Mode.AverageTime)
@@ -81,7 +77,7 @@ public class BenchmarkGroupedTypedHistogram
         private final Random random = new Random();
         private Page[] pages;
         private GroupByIdBlock[] groupByIdBlocks;
-        private GroupedAccumulator groupedAccumulator;
+        private GroupedAggregator groupedAggregator;
 
         @Setup
         public void setUp()
@@ -115,49 +111,38 @@ public class BenchmarkGroupedTypedHistogram
                 groupByIdBlocks[j] = groupByIdBlock;
             }
 
-            InternalAggregationFunction aggregationFunction = getInternalAggregationFunctionVarChar();
-            groupedAccumulator = createGroupedAccumulator(aggregationFunction);
-        }
-
-        private GroupedAccumulator createGroupedAccumulator(InternalAggregationFunction function)
-        {
-            int[] args = GroupByAggregationTestUtils.createArgs(function);
-
-            return function.bind(Ints.asList(args), Optional.empty())
-                    .createGroupedAccumulator();
+            TestingAggregationFunction aggregationFunction = getInternalAggregationFunctionVarChar();
+            groupedAggregator = aggregationFunction.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty())
+                    .createGroupedAggregator();
         }
     }
 
     @Benchmark
-    public GroupedAccumulator testSharedGroupWithLargeBlocksRunner(Data data)
+    public GroupedAggregator testSharedGroupWithLargeBlocksRunner(Data data)
     {
-        GroupedAccumulator groupedAccumulator = data.groupedAccumulator;
+        GroupedAggregator groupedAggregator = data.groupedAggregator;
 
         for (int i = 0; i < data.numGroups; i++) {
             GroupByIdBlock groupByIdBlock = data.groupByIdBlocks[i];
             Page page = data.pages[i];
-            groupedAccumulator.addInput(groupByIdBlock, page);
+            groupedAggregator.processPage(groupByIdBlock, page);
         }
 
-        return groupedAccumulator;
+        return groupedAggregator;
     }
 
-    private static InternalAggregationFunction getInternalAggregationFunctionVarChar()
+    private static TestingAggregationFunction getInternalAggregationFunctionVarChar()
     {
-        Metadata metadata = createTestMetadataManager();
-        return metadata.getAggregateFunctionImplementation(metadata.resolveFunction(QualifiedName.of(NAME), fromTypes(VARCHAR)));
+        TestingFunctionResolution functionResolution = new TestingFunctionResolution();
+        return functionResolution.getAggregateFunction(QualifiedName.of(Histogram.NAME), fromTypes(VARCHAR));
     }
 
     public static void main(String[] args)
             throws RunnerException
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkGroupedTypedHistogram.class.getSimpleName() + ".*")
-                .addProfiler(GCProfiler.class)
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkGroupedTypedHistogram.class)
+                .withOptions(optionsBuilder -> optionsBuilder.addProfiler(GCProfiler.class))
+                .run();
     }
 
     public enum ProbeType

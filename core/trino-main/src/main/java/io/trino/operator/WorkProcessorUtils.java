@@ -131,7 +131,7 @@ public final class WorkProcessorUtils
                         return ProcessState.blocked(processor.getBlockedFuture());
                     }
                     else {
-                        return ProcessState.yield();
+                        return ProcessState.yielded();
                     }
 
                     if (processorIterator.hasNext()) {
@@ -174,7 +174,7 @@ public final class WorkProcessorUtils
         {
             if (!lastProcessYielded && yieldSignal.getAsBoolean()) {
                 lastProcessYielded = true;
-                return ProcessState.yield();
+                return ProcessState.yielded();
             }
             lastProcessYielded = false;
 
@@ -230,7 +230,7 @@ public final class WorkProcessorUtils
             return ProcessState.blocked(processor.getBlockedFuture());
         }
 
-        return ProcessState.yield();
+        return ProcessState.yielded();
     }
 
     static <T, R> WorkProcessor<R> flatMap(WorkProcessor<T> processor, Function<T, WorkProcessor<R>> mapper)
@@ -286,7 +286,7 @@ public final class WorkProcessorUtils
                 return TransformationState.blocked(nestedProcessor.getBlockedFuture());
             }
 
-            return TransformationState.yield();
+            return TransformationState.yielded();
         });
     }
 
@@ -312,7 +312,7 @@ public final class WorkProcessorUtils
                             return ProcessState.blocked(processor.getBlockedFuture());
                         }
                         else {
-                            return ProcessState.yield();
+                            return ProcessState.yielded();
                         }
                     }
 
@@ -331,7 +331,7 @@ public final class WorkProcessorUtils
                         case BLOCKED:
                             return ProcessState.blocked(state.getBlocked());
                         case YIELD:
-                            return ProcessState.yield();
+                            return ProcessState.yielded();
                         case RESULT:
                             return ProcessState.ofResult(state.getResult());
                         case FINISHED:
@@ -352,8 +352,8 @@ public final class WorkProcessorUtils
     {
         @Nullable
         WorkProcessor.Process<T> process;
-        @Nullable
-        ProcessState<T> state;
+        // set initial state to yield as it will cause processor computations to progress
+        ProcessState<T> state = ProcessState.yielded();
 
         ProcessWorkProcessor(WorkProcessor.Process<T> process)
         {
@@ -382,26 +382,26 @@ public final class WorkProcessorUtils
         @Override
         public boolean isBlocked()
         {
-            return state != null && state.getType() == ProcessState.Type.BLOCKED && !state.getBlocked().isDone();
+            return state.getType() == ProcessState.Type.BLOCKED && !state.getBlocked().isDone();
         }
 
         @Override
-        public ListenableFuture<?> getBlockedFuture()
+        public ListenableFuture<Void> getBlockedFuture()
         {
-            checkState(state != null && state.getType() == ProcessState.Type.BLOCKED, "Must be blocked to get blocked future");
+            checkState(state.getType() == ProcessState.Type.BLOCKED, "Must be blocked to get blocked future");
             return state.getBlocked();
         }
 
         @Override
         public boolean isFinished()
         {
-            return state != null && state.getType() == ProcessState.Type.FINISHED;
+            return state.getType() == ProcessState.Type.FINISHED;
         }
 
         @Override
         public T getResult()
         {
-            checkState(state != null && state.getType() == ProcessState.Type.RESULT, "process() must return true and must not be finished");
+            checkState(state.getType() == ProcessState.Type.RESULT, "process() must return true and must not be finished");
             return state.getResult();
         }
     }

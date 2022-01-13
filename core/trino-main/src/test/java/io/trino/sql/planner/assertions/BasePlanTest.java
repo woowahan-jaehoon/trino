@@ -25,9 +25,9 @@ import io.trino.sql.planner.Plan;
 import io.trino.sql.planner.RuleStatsRecorder;
 import io.trino.sql.planner.SubPlan;
 import io.trino.sql.planner.iterative.IterativeOptimizer;
+import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.iterative.rule.RemoveRedundantIdentityProjections;
 import io.trino.sql.planner.optimizations.PlanOptimizer;
-import io.trino.sql.planner.optimizations.PruneUnreferencedOutputs;
 import io.trino.sql.planner.optimizations.UnaliasSymbolReferences;
 import io.trino.testing.LocalQueryRunner;
 import org.intellij.lang.annotations.Language;
@@ -42,6 +42,7 @@ import java.util.function.Predicate;
 import static io.airlift.testing.Closeables.closeAllRuntimeException;
 import static io.trino.sql.planner.LogicalPlanner.Stage.OPTIMIZED;
 import static io.trino.sql.planner.LogicalPlanner.Stage.OPTIMIZED_AND_VALIDATED;
+import static io.trino.sql.planner.PlanOptimizers.columnPruningRules;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -69,7 +70,7 @@ public class BasePlanTest
                 .setSchema("tiny")
                 .setSystemProperty("task_concurrency", "1"); // these tests don't handle exchanges from local parallel
 
-        sessionProperties.entrySet().forEach(entry -> sessionBuilder.setSystemProperty(entry.getKey(), entry.getValue()));
+        sessionProperties.forEach(sessionBuilder::setSystemProperty);
 
         LocalQueryRunner queryRunner = LocalQueryRunner.create(sessionBuilder.build());
 
@@ -102,29 +103,29 @@ public class BasePlanTest
         return queryRunner;
     }
 
-    protected void assertPlan(String sql, PlanMatchPattern pattern)
+    protected void assertPlan(@Language("SQL") String sql, PlanMatchPattern pattern)
     {
         assertPlan(sql, OPTIMIZED_AND_VALIDATED, pattern);
     }
 
-    protected void assertPlan(String sql, Session session, PlanMatchPattern pattern)
+    protected void assertPlan(@Language("SQL") String sql, Session session, PlanMatchPattern pattern)
     {
         assertPlanWithSession(sql, session, true, pattern);
     }
 
-    protected void assertPlan(String sql, LogicalPlanner.Stage stage, PlanMatchPattern pattern)
+    protected void assertPlan(@Language("SQL") String sql, LogicalPlanner.Stage stage, PlanMatchPattern pattern)
     {
         List<PlanOptimizer> optimizers = queryRunner.getPlanOptimizers(true);
 
         assertPlan(sql, stage, pattern, optimizers);
     }
 
-    protected void assertPlan(String sql, PlanMatchPattern pattern, List<PlanOptimizer> optimizers)
+    protected void assertPlan(@Language("SQL") String sql, PlanMatchPattern pattern, List<PlanOptimizer> optimizers)
     {
         assertPlan(sql, OPTIMIZED, pattern, optimizers);
     }
 
-    protected void assertPlan(String sql, LogicalPlanner.Stage stage, PlanMatchPattern pattern, Predicate<PlanOptimizer> optimizerPredicate)
+    protected void assertPlan(@Language("SQL") String sql, LogicalPlanner.Stage stage, PlanMatchPattern pattern, Predicate<PlanOptimizer> optimizerPredicate)
     {
         List<PlanOptimizer> optimizers = queryRunner.getPlanOptimizers(true).stream()
                 .filter(optimizerPredicate)
@@ -133,7 +134,7 @@ public class BasePlanTest
         assertPlan(sql, stage, pattern, optimizers);
     }
 
-    protected void assertPlan(String sql, LogicalPlanner.Stage stage, PlanMatchPattern pattern, List<PlanOptimizer> optimizers)
+    protected void assertPlan(@Language("SQL") String sql, LogicalPlanner.Stage stage, PlanMatchPattern pattern, List<PlanOptimizer> optimizers)
     {
         queryRunner.inTransaction(transactionSession -> {
             Plan actualPlan = queryRunner.createPlan(transactionSession, sql, optimizers, stage, WarningCollector.NOOP);
@@ -142,12 +143,12 @@ public class BasePlanTest
         });
     }
 
-    protected void assertDistributedPlan(String sql, PlanMatchPattern pattern)
+    protected void assertDistributedPlan(@Language("SQL") String sql, PlanMatchPattern pattern)
     {
         assertDistributedPlan(sql, getQueryRunner().getDefaultSession(), pattern);
     }
 
-    protected void assertDistributedPlan(String sql, Session session, PlanMatchPattern pattern)
+    protected void assertDistributedPlan(@Language("SQL") String sql, Session session, PlanMatchPattern pattern)
     {
         assertPlanWithSession(sql, session, false, pattern);
     }
@@ -156,12 +157,15 @@ public class BasePlanTest
     {
         List<PlanOptimizer> optimizers = ImmutableList.of(
                 new UnaliasSymbolReferences(getQueryRunner().getMetadata()),
-                new PruneUnreferencedOutputs(queryRunner.getMetadata()),
                 new IterativeOptimizer(
+                        queryRunner.getMetadata(),
                         new RuleStatsRecorder(),
                         queryRunner.getStatsCalculator(),
                         queryRunner.getCostCalculator(),
-                        ImmutableSet.of(new RemoveRedundantIdentityProjections())));
+                        ImmutableSet.<Rule<?>>builder()
+                                .add(new RemoveRedundantIdentityProjections())
+                                .addAll(columnPruningRules(getQueryRunner().getMetadata()))
+                                .build()));
 
         assertPlan(sql, OPTIMIZED, pattern, optimizers);
     }
@@ -185,17 +189,17 @@ public class BasePlanTest
         });
     }
 
-    protected Plan plan(String sql)
+    protected Plan plan(@Language("SQL") String sql)
     {
         return plan(sql, OPTIMIZED_AND_VALIDATED);
     }
 
-    protected Plan plan(String sql, LogicalPlanner.Stage stage)
+    protected Plan plan(@Language("SQL") String sql, LogicalPlanner.Stage stage)
     {
         return plan(sql, stage, true);
     }
 
-    protected Plan plan(String sql, LogicalPlanner.Stage stage, boolean forceSingleNode)
+    protected Plan plan(@Language("SQL") String sql, LogicalPlanner.Stage stage, boolean forceSingleNode)
     {
         try {
             return queryRunner.inTransaction(transactionSession -> queryRunner.createPlan(transactionSession, sql, stage, forceSingleNode, WarningCollector.NOOP));
@@ -205,12 +209,12 @@ public class BasePlanTest
         }
     }
 
-    protected SubPlan subplan(String sql, LogicalPlanner.Stage stage, boolean forceSingleNode)
+    protected SubPlan subplan(@Language("SQL") String sql, LogicalPlanner.Stage stage, boolean forceSingleNode)
     {
         return subplan(sql, stage, forceSingleNode, getQueryRunner().getDefaultSession());
     }
 
-    protected SubPlan subplan(String sql, LogicalPlanner.Stage stage, boolean forceSingleNode, Session session)
+    protected SubPlan subplan(@Language("SQL") String sql, LogicalPlanner.Stage stage, boolean forceSingleNode, Session session)
     {
         try {
             return queryRunner.inTransaction(session, transactionSession -> {

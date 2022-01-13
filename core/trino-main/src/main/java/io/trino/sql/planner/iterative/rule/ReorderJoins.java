@@ -22,6 +22,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.Sets;
 import io.airlift.log.Logger;
+import io.trino.FeaturesConfig.JoinDistributionType;
 import io.trino.Session;
 import io.trino.cost.CostComparator;
 import io.trino.cost.CostProvider;
@@ -32,11 +33,12 @@ import io.trino.cost.StatsProvider;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
 import io.trino.metadata.Metadata;
-import io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType;
 import io.trino.sql.planner.EqualityInference;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolsExtractor;
+import io.trino.sql.planner.TypeAnalyzer;
+import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.FilterNode;
@@ -67,13 +69,13 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Sets.powerSet;
+import static io.trino.FeaturesConfig.JoinReorderingStrategy.AUTOMATIC;
 import static io.trino.SystemSessionProperties.getJoinDistributionType;
 import static io.trino.SystemSessionProperties.getJoinReorderingStrategy;
 import static io.trino.SystemSessionProperties.getMaxReorderedJoins;
 import static io.trino.sql.ExpressionUtils.and;
 import static io.trino.sql.ExpressionUtils.combineConjuncts;
 import static io.trino.sql.ExpressionUtils.extractConjuncts;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.AUTOMATIC;
 import static io.trino.sql.planner.DeterminismEvaluator.isDeterministic;
 import static io.trino.sql.planner.EqualityInference.nonInferrableConjuncts;
 import static io.trino.sql.planner.iterative.rule.DetermineJoinDistributionType.canReplicate;
@@ -99,11 +101,12 @@ public class ReorderJoins
     // We check that join distribution type is absent because we only want
     // to do this transformation once (reordered joins will have distribution type already set).
     private final Pattern<JoinNode> pattern;
+    private final TypeAnalyzer typeAnalyzer;
 
     private final Metadata metadata;
     private final CostComparator costComparator;
 
-    public ReorderJoins(Metadata metadata, CostComparator costComparator)
+    public ReorderJoins(Metadata metadata, CostComparator costComparator, TypeAnalyzer typeAnalyzer)
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.costComparator = requireNonNull(costComparator, "costComparator is null");
@@ -111,6 +114,7 @@ public class ReorderJoins
                 joinNode -> joinNode.getDistributionType().isEmpty()
                         && joinNode.getType() == INNER
                         && isDeterministic(joinNode.getFilter().orElse(TRUE_LITERAL), metadata));
+        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
     }
 
     @Override
@@ -129,7 +133,7 @@ public class ReorderJoins
     public Result apply(JoinNode joinNode, Captures captures, Context context)
     {
         // try reorder joins with projection pushdown first
-        MultiJoinNode multiJoinNode = toMultiJoinNode(metadata, joinNode, context, true);
+        MultiJoinNode multiJoinNode = toMultiJoinNode(metadata, joinNode, context, true, typeAnalyzer);
         JoinEnumerationResult resultWithProjectionPushdown = chooseJoinOrder(multiJoinNode, context);
         if (resultWithProjectionPushdown.getPlanNode().isEmpty()) {
             return Result.empty();
@@ -140,7 +144,7 @@ public class ReorderJoins
         }
 
         // try reorder joins without projection pushdown
-        multiJoinNode = toMultiJoinNode(metadata, joinNode, context, false);
+        multiJoinNode = toMultiJoinNode(metadata, joinNode, context, false, typeAnalyzer);
         JoinEnumerationResult resultWithoutProjectionPushdown = chooseJoinOrder(multiJoinNode, context);
         if (resultWithoutProjectionPushdown.getPlanNode().isEmpty()
                 || costComparator.compare(context.getSession(), resultWithProjectionPushdown.cost, resultWithoutProjectionPushdown.cost) < 0) {
@@ -348,7 +352,7 @@ public class ReorderJoins
             // This takes all conjuncts that were part of allFilters that
             // could not be used for equality inference.
             // If they use both the left and right symbols, we add them to the list of joinPredicates
-            nonInferrableConjuncts(metadata, allFilter).stream()
+            nonInferrableConjuncts(metadata, allFilter)
                     .map(conjunct -> allFilterInference.rewrite(conjunct, Sets.union(leftSymbols, rightSymbols)))
                     .filter(Objects::nonNull)
                     // filter expressions that contain only left or right symbols
@@ -372,7 +376,7 @@ public class ReorderJoins
                 Set<Symbol> scope = ImmutableSet.copyOf(outputSymbols);
                 ImmutableList.Builder<Expression> predicates = ImmutableList.builder();
                 predicates.addAll(allFilterInference.generateEqualitiesPartitionedBy(scope).getScopeEqualities());
-                nonInferrableConjuncts(metadata, allFilter).stream()
+                nonInferrableConjuncts(metadata, allFilter)
                         .map(conjunct -> allFilterInference.rewrite(conjunct, scope))
                         .filter(Objects::nonNull)
                         .forEach(predicates::add);
@@ -545,20 +549,42 @@ public class ReorderJoins
                     && this.pushedProjectionThroughJoin == other.pushedProjectionThroughJoin;
         }
 
-        static MultiJoinNode toMultiJoinNode(Metadata metadata, JoinNode joinNode, Context context, boolean pushProjectionsThroughJoin)
+        static MultiJoinNode toMultiJoinNode(Metadata metadata, JoinNode joinNode, Context context, boolean pushProjectionsThroughJoin, TypeAnalyzer typeAnalyzer)
         {
-            return toMultiJoinNode(metadata, joinNode, context.getLookup(), context.getIdAllocator(), getMaxReorderedJoins(context.getSession()), pushProjectionsThroughJoin);
+            return toMultiJoinNode(
+                    metadata,
+                    joinNode,
+                    context.getLookup(),
+                    context.getIdAllocator(),
+                    getMaxReorderedJoins(context.getSession()),
+                    pushProjectionsThroughJoin,
+                    context.getSession(),
+                    typeAnalyzer,
+                    context.getSymbolAllocator().getTypes());
         }
 
-        static MultiJoinNode toMultiJoinNode(Metadata metadata, JoinNode joinNode, Lookup lookup, PlanNodeIdAllocator planNodeIdAllocator, int joinLimit, boolean pushProjectionsThroughJoin)
+        static MultiJoinNode toMultiJoinNode(
+                Metadata metadata,
+                JoinNode joinNode,
+                Lookup lookup,
+                PlanNodeIdAllocator planNodeIdAllocator,
+                int joinLimit,
+                boolean pushProjectionsThroughJoin,
+                Session session,
+                TypeAnalyzer typeAnalyzer,
+                TypeProvider types)
         {
             // the number of sources is the number of joins + 1
-            return new JoinNodeFlattener(metadata, joinNode, lookup, planNodeIdAllocator, joinLimit + 1, pushProjectionsThroughJoin).toMultiJoinNode();
+            return new JoinNodeFlattener(metadata, joinNode, lookup, planNodeIdAllocator, joinLimit + 1, pushProjectionsThroughJoin, session, typeAnalyzer, types)
+                    .toMultiJoinNode();
         }
 
         private static class JoinNodeFlattener
         {
             private final Metadata metadata;
+            private final Session session;
+            private final TypeAnalyzer typeAnalyzer;
+            private final TypeProvider types;
             private final Lookup lookup;
             private final PlanNodeIdAllocator planNodeIdAllocator;
 
@@ -570,7 +596,16 @@ public class ReorderJoins
             // if projection was pushed through join during join graph flattening?
             private boolean pushedProjectionThroughJoin;
 
-            JoinNodeFlattener(Metadata metadata, JoinNode node, Lookup lookup, PlanNodeIdAllocator planNodeIdAllocator, int sourceLimit, boolean pushProjectionsThroughJoin)
+            JoinNodeFlattener(
+                    Metadata metadata,
+                    JoinNode node,
+                    Lookup lookup,
+                    PlanNodeIdAllocator planNodeIdAllocator,
+                    int sourceLimit,
+                    boolean pushProjectionsThroughJoin,
+                    Session session,
+                    TypeAnalyzer typeAnalyzer,
+                    TypeProvider types)
             {
                 this.metadata = requireNonNull(metadata, "metadata is null");
                 requireNonNull(node, "node is null");
@@ -579,6 +614,10 @@ public class ReorderJoins
                 this.lookup = requireNonNull(lookup, "lookup is null");
                 this.planNodeIdAllocator = requireNonNull(planNodeIdAllocator, "planNodeIdAllocator is null");
                 this.pushProjectionsThroughJoin = pushProjectionsThroughJoin;
+                this.session = requireNonNull(session, "session is null");
+                this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
+                this.types = requireNonNull(types, "types is null");
+
                 flattenNode(node, sourceLimit);
             }
 
@@ -592,7 +631,7 @@ public class ReorderJoins
                         return;
                     }
 
-                    Optional<PlanNode> rewrittenNode = pushProjectionThroughJoin(metadata, (ProjectNode) resolved, lookup, planNodeIdAllocator);
+                    Optional<PlanNode> rewrittenNode = pushProjectionThroughJoin(metadata, (ProjectNode) resolved, lookup, planNodeIdAllocator, session, typeAnalyzer, types);
                     if (rewrittenNode.isEmpty()) {
                         sources.add(node);
                         return;

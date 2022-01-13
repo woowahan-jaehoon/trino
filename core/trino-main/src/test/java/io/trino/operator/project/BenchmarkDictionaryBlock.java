@@ -33,10 +33,6 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 import org.testng.annotations.Test;
 
 import java.util.List;
@@ -46,8 +42,9 @@ import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.block.BlockAssertions.createSlicesBlock;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.concurrent.TimeUnit.MICROSECONDS;
 
 @SuppressWarnings("MethodMayBeStatic")
@@ -104,7 +101,7 @@ public class BenchmarkDictionaryBlock
 
         private static Block createMapBlock(int positionCount)
         {
-            MapType mapType = (MapType) createTestMetadataManager().getType(new TypeSignature(StandardTypes.MAP, TypeSignatureParameter.typeParameter(VARCHAR.getTypeSignature()), TypeSignatureParameter.typeParameter(VARCHAR.getTypeSignature())));
+            MapType mapType = (MapType) TESTING_TYPE_MANAGER.getType(new TypeSignature(StandardTypes.MAP, TypeSignatureParameter.typeParameter(VARCHAR.getTypeSignature()), TypeSignatureParameter.typeParameter(VARCHAR.getTypeSignature())));
             Block keyBlock = createDictionaryBlock(generateList("key", positionCount));
             Block valueBlock = createDictionaryBlock(generateList("value", positionCount));
             int[] offsets = new int[positionCount + 1];
@@ -202,10 +199,6 @@ public class BenchmarkDictionaryBlock
         data.setup();
         new BenchmarkDictionaryBlock().getSizeInBytes(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkDictionaryBlock.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        benchmark(BenchmarkDictionaryBlock.class).run();
     }
 }

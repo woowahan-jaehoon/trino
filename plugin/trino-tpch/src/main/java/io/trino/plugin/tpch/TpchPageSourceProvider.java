@@ -20,18 +20,19 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
-import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.connector.DynamicFilter;
 
 import java.util.List;
 
 public class TpchPageSourceProvider
         implements ConnectorPageSourceProvider
 {
-    private final TpchRecordSetProvider tpchRecordSetProvider = new TpchRecordSetProvider();
+    private final TpchRecordSetProvider tpchRecordSetProvider;
     private final int maxRowsPerPage;
 
-    TpchPageSourceProvider(int maxRowsPerPage)
+    TpchPageSourceProvider(int maxRowsPerPage, DecimalTypeMapping decimalTypeMapping)
     {
+        this.tpchRecordSetProvider = new TpchRecordSetProvider(decimalTypeMapping);
         this.maxRowsPerPage = maxRowsPerPage;
     }
 
@@ -42,7 +43,7 @@ public class TpchPageSourceProvider
             ConnectorSplit split,
             ConnectorTableHandle table,
             List<ColumnHandle> columns,
-            TupleDomain<ColumnHandle> dynamicFilter)
+            DynamicFilter dynamicFilter)
     {
         return new LazyRecordPageSource(maxRowsPerPage, tpchRecordSetProvider.getRecordSet(transaction, session, split, table, columns));
     }

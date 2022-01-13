@@ -16,17 +16,17 @@ package io.trino;
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.trino.FeaturesConfig.JoinDistributionType;
+import io.trino.FeaturesConfig.JoinReorderingStrategy;
 import io.trino.execution.DynamicFilterConfig;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.TaskManagerConfig;
 import io.trino.execution.scheduler.NodeSchedulerConfig;
 import io.trino.memory.MemoryManagerConfig;
 import io.trino.memory.NodeMemoryConfig;
+import io.trino.operator.RetryPolicy;
 import io.trino.spi.TrinoException;
 import io.trino.spi.session.PropertyMetadata;
-import io.trino.sql.analyzer.FeaturesConfig;
-import io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType;
-import io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy;
 
 import javax.inject.Inject;
 
@@ -38,16 +38,19 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.base.session.PropertyMetadataUtil.dataSizeProperty;
 import static io.trino.plugin.base.session.PropertyMetadataUtil.durationProperty;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.session.PropertyMetadata.booleanProperty;
 import static io.trino.spi.session.PropertyMetadata.doubleProperty;
 import static io.trino.spi.session.PropertyMetadata.enumProperty;
 import static io.trino.spi.session.PropertyMetadata.integerProperty;
 import static io.trino.spi.session.PropertyMetadata.stringProperty;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TimeZoneKey.getTimeZoneKey;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 
 public final class SystemSessionProperties
+        implements SystemSessionPropertiesProvider
 {
     public static final String OPTIMIZE_HASH_GENERATION = "optimize_hash_generation";
     public static final String JOIN_DISTRIBUTION_TYPE = "join_distribution_type";
@@ -63,6 +66,7 @@ public final class SystemSessionProperties
     public static final String QUERY_MAX_MEMORY = "query_max_memory";
     public static final String QUERY_MAX_TOTAL_MEMORY = "query_max_total_memory";
     public static final String QUERY_MAX_EXECUTION_TIME = "query_max_execution_time";
+    public static final String QUERY_MAX_PLANNING_TIME = "query_max_planning_time";
     public static final String QUERY_MAX_RUN_TIME = "query_max_run_time";
     public static final String RESOURCE_OVERCOMMIT = "resource_overcommit";
     public static final String QUERY_MAX_CPU_TIME = "query_max_cpu_time";
@@ -104,6 +108,8 @@ public final class SystemSessionProperties
     public static final String FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_SIZE = "filter_and_project_min_output_page_size";
     public static final String FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_ROW_COUNT = "filter_and_project_min_output_page_row_count";
     public static final String DISTRIBUTED_SORT = "distributed_sort";
+    public static final String USE_PARTIAL_TOPN = "use_partial_topn";
+    public static final String USE_PARTIAL_DISTINCT_LIMIT = "use_partial_distinct_limit";
     public static final String MAX_RECURSION_DEPTH = "max_recursion_depth";
     public static final String USE_MARK_DISTINCT = "use_mark_distinct";
     public static final String PREFER_PARTIAL_AGGREGATION = "prefer_partial_aggregation";
@@ -111,21 +117,21 @@ public final class SystemSessionProperties
     public static final String MAX_GROUPING_SETS = "max_grouping_sets";
     public static final String STATISTICS_CPU_TIMER_ENABLED = "statistics_cpu_timer_enabled";
     public static final String ENABLE_STATS_CALCULATOR = "enable_stats_calculator";
+    public static final String STATISTICS_PRECALCULATION_FOR_PUSHDOWN_ENABLED = "statistics_precalculation_for_pushdown_enabled";
     public static final String COLLECT_PLAN_STATISTICS_FOR_ALL_QUERIES = "collect_plan_statistics_for_all_queries";
     public static final String IGNORE_STATS_CALCULATOR_FAILURES = "ignore_stats_calculator_failures";
     public static final String MAX_DRIVERS_PER_TASK = "max_drivers_per_task";
     public static final String DEFAULT_FILTER_FACTOR_ENABLED = "default_filter_factor_enabled";
-    public static final String UNWRAP_CASTS = "unwrap_casts";
     public static final String SKIP_REDUNDANT_SORT = "skip_redundant_sort";
     public static final String ALLOW_PUSHDOWN_INTO_CONNECTORS = "allow_pushdown_into_connectors";
     public static final String PREDICATE_PUSHDOWN_USE_TABLE_PROPERTIES = "predicate_pushdown_use_table_properties";
     public static final String LATE_MATERIALIZATION = "late_materialization";
     public static final String ENABLE_DYNAMIC_FILTERING = "enable_dynamic_filtering";
+    public static final String ENABLE_COORDINATOR_DYNAMIC_FILTERS_DISTRIBUTION = "enable_coordinator_dynamic_filters_distribution";
     public static final String ENABLE_LARGE_DYNAMIC_FILTERS = "enable_large_dynamic_filters";
     public static final String QUERY_MAX_MEMORY_PER_NODE = "query_max_memory_per_node";
     public static final String QUERY_MAX_TOTAL_MEMORY_PER_NODE = "query_max_total_memory_per_node";
     public static final String IGNORE_DOWNSTREAM_PREFERENCES = "ignore_downstream_preferences";
-    public static final String ITERATIVE_COLUMN_PRUNING = "iterative_rule_based_column_pruning";
     public static final String FILTERING_SEMI_JOIN_TO_INNER = "rewrite_filtering_semi_join_to_inner_join";
     public static final String OPTIMIZE_DUPLICATE_INSENSITIVE_JOINS = "optimize_duplicate_insensitive_joins";
     public static final String REQUIRED_WORKERS_COUNT = "required_workers_count";
@@ -134,6 +140,16 @@ public final class SystemSessionProperties
     public static final String OMIT_DATETIME_TYPE_PRECISION = "omit_datetime_type_precision";
     public static final String USE_LEGACY_WINDOW_FILTER_PUSHDOWN = "use_legacy_window_filter_pushdown";
     public static final String MAX_UNACKNOWLEDGED_SPLITS_PER_TASK = "max_unacknowledged_splits_per_task";
+    public static final String MERGE_PROJECT_WITH_VALUES = "merge_project_with_values";
+    public static final String TIME_ZONE_ID = "time_zone_id";
+    public static final String LEGACY_CATALOG_ROLES = "legacy_catalog_roles";
+    public static final String INCREMENTAL_HASH_ARRAY_LOAD_FACTOR_ENABLED = "incremental_hash_array_load_factor_enabled";
+    public static final String MAX_PARTIAL_TOP_N_MEMORY = "max_partial_top_n_memory";
+    public static final String RETRY_POLICY = "retry_policy";
+    public static final String RETRY_ATTEMPTS = "retry_attempts";
+    public static final String RETRY_INITIAL_DELAY = "retry_initial_delay";
+    public static final String RETRY_MAX_DELAY = "retry_max_delay";
+    public static final String HIDE_INACCESSIBLE_COLUMNS = "hide_inaccessible_columns";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -260,6 +276,11 @@ public final class SystemSessionProperties
                         QUERY_MAX_EXECUTION_TIME,
                         "Maximum execution time of a query",
                         queryManagerConfig.getQueryMaxExecutionTime(),
+                        false),
+                durationProperty(
+                        QUERY_MAX_PLANNING_TIME,
+                        "Maximum planning time of a query",
+                        queryManagerConfig.getQueryMaxPlanningTime(),
                         false),
                 durationProperty(
                         QUERY_MAX_CPU_TIME,
@@ -447,6 +468,18 @@ public final class SystemSessionProperties
                         "Parallelize sort across multiple nodes",
                         featuresConfig.isDistributedSortEnabled(),
                         false),
+                booleanProperty(
+                        // Useful to make EXPLAIN or SHOW STATS provide stats for a query involving TopN
+                        USE_PARTIAL_TOPN,
+                        "Use partial TopN",
+                        true,
+                        true),
+                booleanProperty(
+                        // Useful to make EXPLAIN or SHOW STATS provide stats for a query involving TopN
+                        USE_PARTIAL_DISTINCT_LIMIT,
+                        "Use partial Distinct Limit",
+                        true,
+                        true),
                 new PropertyMetadata<>(
                         MAX_RECURSION_DEPTH,
                         "Maximum recursion depth for recursive common table expression",
@@ -487,6 +520,11 @@ public final class SystemSessionProperties
                         featuresConfig.isEnableStatsCalculator(),
                         false),
                 booleanProperty(
+                        STATISTICS_PRECALCULATION_FOR_PUSHDOWN_ENABLED,
+                        "Enable statistics precalculation for pushdown",
+                        featuresConfig.isStatisticsPrecalculationForPushdownEnabled(),
+                        false),
+                booleanProperty(
                         COLLECT_PLAN_STATISTICS_FOR_ALL_QUERIES,
                         "Collect plan statistics for non-EXPLAIN queries",
                         featuresConfig.isCollectPlanStatisticsForAllQueries(),
@@ -509,11 +547,6 @@ public final class SystemSessionProperties
                         DEFAULT_FILTER_FACTOR_ENABLED,
                         "use a default filter factor for unknown filters in a filter node",
                         featuresConfig.isDefaultFilterFactorEnabled(),
-                        false),
-                booleanProperty(
-                        UNWRAP_CASTS,
-                        "Enable optimization to unwrap CAST expression",
-                        featuresConfig.isUnwrapCasts(),
                         false),
                 booleanProperty(
                         SKIP_REDUNDANT_SORT,
@@ -542,6 +575,11 @@ public final class SystemSessionProperties
                         dynamicFilterConfig.isEnableDynamicFiltering(),
                         false),
                 booleanProperty(
+                        ENABLE_COORDINATOR_DYNAMIC_FILTERS_DISTRIBUTION,
+                        "Enable distribution of dynamic filters from coordinator to all workers",
+                        dynamicFilterConfig.isEnableCoordinatorDynamicFiltersDistribution(),
+                        false),
+                booleanProperty(
                         ENABLE_LARGE_DYNAMIC_FILTERS,
                         "Enable collection of large dynamic filters",
                         dynamicFilterConfig.isEnableLargeDynamicFilters(),
@@ -560,11 +598,6 @@ public final class SystemSessionProperties
                         IGNORE_DOWNSTREAM_PREFERENCES,
                         "Ignore Parent's PreferredProperties in AddExchange optimizer",
                         featuresConfig.isIgnoreDownstreamPreferences(),
-                        false),
-                booleanProperty(
-                        ITERATIVE_COLUMN_PRUNING,
-                        "Use iterative rules to prune unreferenced columns",
-                        featuresConfig.isIterativeRuleBasedColumnPruning(),
                         false),
                 booleanProperty(
                         FILTERING_SEMI_JOIN_TO_INNER,
@@ -609,9 +642,67 @@ public final class SystemSessionProperties
                         nodeSchedulerConfig.getMaxUnacknowledgedSplitsPerTask(),
                         false,
                         value -> validateIntegerValue(value, MAX_UNACKNOWLEDGED_SPLITS_PER_TASK, 1, false),
-                        object -> object));
+                        object -> object),
+                booleanProperty(
+                        MERGE_PROJECT_WITH_VALUES,
+                        "Inline project expressions into values",
+                        featuresConfig.isMergeProjectWithValues(),
+                        false),
+                stringProperty(
+                        TIME_ZONE_ID,
+                        "Time Zone Id for the current session",
+                        null,
+                        value -> {
+                            if (value != null) {
+                                getTimeZoneKey(value);
+                            }
+                        },
+                        true),
+                booleanProperty(
+                        LEGACY_CATALOG_ROLES,
+                        "Enable legacy role management syntax that assumed all roles are catalog scoped",
+                        featuresConfig.isLegacyCatalogRoles(),
+                        true),
+                booleanProperty(
+                        INCREMENTAL_HASH_ARRAY_LOAD_FACTOR_ENABLED,
+                        "Use smaller load factor for small hash arrays in order to improve performance",
+                        featuresConfig.isIncrementalHashArrayLoadFactorEnabled(),
+                        false),
+                dataSizeProperty(
+                        MAX_PARTIAL_TOP_N_MEMORY,
+                        "Max memory size for partial Top N aggregations. This can be turned off by setting it with '0'.",
+                        taskManagerConfig.getMaxPartialTopNMemory(),
+                        false),
+                enumProperty(
+                        RETRY_POLICY,
+                        "Retry policy",
+                        RetryPolicy.class,
+                        queryManagerConfig.getRetryPolicy(),
+                        false),
+                integerProperty(
+                        RETRY_ATTEMPTS,
+                        "Maximum number of retry attempts",
+                        queryManagerConfig.getRetryAttempts(),
+                        false),
+                durationProperty(
+                        RETRY_INITIAL_DELAY,
+                        "Initial delay before initiating a retry attempt. Delay increases exponentially for each subsequent attempt up to 'retry_max_delay'",
+                        queryManagerConfig.getRetryInitialDelay(),
+                        false),
+                durationProperty(
+                        RETRY_MAX_DELAY,
+                        "Maximum delay before initiating a retry attempt. Delay increases exponentially for each subsequent attempt starting from 'retry_initial_delay'",
+                        queryManagerConfig.getRetryMaxDelay(),
+                        false),
+                booleanProperty(
+                        HIDE_INACCESSIBLE_COLUMNS,
+                        "When enabled non-accessible columns are silently filtered from results from SELECT * statements",
+                        featuresConfig.isHideInaccesibleColumns(),
+                        value -> validateHideInaccesibleColumns(value, featuresConfig.isHideInaccesibleColumns()),
+                        false));
     }
 
+    @Override
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
@@ -735,6 +826,11 @@ public final class SystemSessionProperties
     public static Duration getQueryMaxExecutionTime(Session session)
     {
         return session.getSystemProperty(QUERY_MAX_EXECUTION_TIME, Duration.class);
+    }
+
+    public static Duration getQueryMaxPlanningTime(Session session)
+    {
+        return session.getSystemProperty(QUERY_MAX_PLANNING_TIME, Duration.class);
     }
 
     public static boolean resourceOvercommit(Session session)
@@ -913,7 +1009,22 @@ public final class SystemSessionProperties
 
     public static boolean isDistributedSortEnabled(Session session)
     {
+        if (getRetryPolicy(session) != RetryPolicy.NONE) {
+            // distributed sort is not supported with failure recovery capabilities enabled
+            return false;
+        }
+
         return session.getSystemProperty(DISTRIBUTED_SORT, Boolean.class);
+    }
+
+    public static boolean isUsePartialTopN(Session session)
+    {
+        return session.getSystemProperty(USE_PARTIAL_TOPN, Boolean.class);
+    }
+
+    public static boolean isUsePartialDistinctLimit(Session session)
+    {
+        return session.getSystemProperty(USE_PARTIAL_DISTINCT_LIMIT, Boolean.class);
     }
 
     public static int getMaxRecursionDepth(Session session)
@@ -924,6 +1035,13 @@ public final class SystemSessionProperties
     public static int getMaxGroupingSets(Session session)
     {
         return session.getSystemProperty(MAX_GROUPING_SETS, Integer.class);
+    }
+
+    private static void validateHideInaccesibleColumns(boolean value, boolean defaultValue)
+    {
+        if (defaultValue == true && value == false) {
+            throw new TrinoException(INVALID_SESSION_PROPERTY, format("%s cannot be disabled with session property when it was enabled with configuration", HIDE_INACCESSIBLE_COLUMNS));
+        }
     }
 
     public static OptionalInt getMaxDriversPerTask(Session session)
@@ -977,6 +1095,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(ENABLE_STATS_CALCULATOR, Boolean.class);
     }
 
+    public static boolean isStatisticsPrecalculationForPushdownEnabled(Session session)
+    {
+        return session.getSystemProperty(STATISTICS_PRECALCULATION_FOR_PUSHDOWN_ENABLED, Boolean.class);
+    }
+
     public static boolean isCollectPlanStatisticsForAllQueries(Session session)
     {
         return session.getSystemProperty(COLLECT_PLAN_STATISTICS_FOR_ALL_QUERIES, Boolean.class);
@@ -990,11 +1113,6 @@ public final class SystemSessionProperties
     public static boolean isDefaultFilterFactorEnabled(Session session)
     {
         return session.getSystemProperty(DEFAULT_FILTER_FACTOR_ENABLED, Boolean.class);
-    }
-
-    public static boolean isUnwrapCasts(Session session)
-    {
-        return session.getSystemProperty(UNWRAP_CASTS, Boolean.class);
     }
 
     public static boolean isSkipRedundantSort(Session session)
@@ -1022,6 +1140,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(ENABLE_DYNAMIC_FILTERING, Boolean.class);
     }
 
+    public static boolean isEnableCoordinatorDynamicFiltersDistribution(Session session)
+    {
+        return session.getSystemProperty(ENABLE_COORDINATOR_DYNAMIC_FILTERS_DISTRIBUTION, Boolean.class);
+    }
+
     public static boolean isEnableLargeDynamicFilters(Session session)
     {
         return session.getSystemProperty(ENABLE_LARGE_DYNAMIC_FILTERS, Boolean.class);
@@ -1040,11 +1163,6 @@ public final class SystemSessionProperties
     public static boolean ignoreDownStreamPreferences(Session session)
     {
         return session.getSystemProperty(IGNORE_DOWNSTREAM_PREFERENCES, Boolean.class);
-    }
-
-    public static boolean isIterativeRuleBasedColumnPruning(Session session)
-    {
-        return session.getSystemProperty(ITERATIVE_COLUMN_PRUNING, Boolean.class);
     }
 
     public static boolean isRewriteFilteringSemiJoinToInnerJoin(Session session)
@@ -1085,5 +1203,61 @@ public final class SystemSessionProperties
     public static int getMaxUnacknowledgedSplitsPerTask(Session session)
     {
         return session.getSystemProperty(MAX_UNACKNOWLEDGED_SPLITS_PER_TASK, Integer.class);
+    }
+
+    public static boolean isMergeProjectWithValues(Session session)
+    {
+        return session.getSystemProperty(MERGE_PROJECT_WITH_VALUES, Boolean.class);
+    }
+
+    public static Optional<String> getTimeZoneId(Session session)
+    {
+        return Optional.ofNullable(session.getSystemProperty(TIME_ZONE_ID, String.class));
+    }
+
+    public static boolean isLegacyCatalogRoles(Session session)
+    {
+        return session.getSystemProperty(LEGACY_CATALOG_ROLES, Boolean.class);
+    }
+
+    public static boolean isIncrementalHashArrayLoadFactorEnabled(Session session)
+    {
+        return session.getSystemProperty(INCREMENTAL_HASH_ARRAY_LOAD_FACTOR_ENABLED, Boolean.class);
+    }
+
+    public static DataSize getMaxPartialTopNMemory(Session session)
+    {
+        return session.getSystemProperty(MAX_PARTIAL_TOP_N_MEMORY, DataSize.class);
+    }
+
+    public static RetryPolicy getRetryPolicy(Session session)
+    {
+        RetryPolicy retryPolicy = session.getSystemProperty(RETRY_POLICY, RetryPolicy.class);
+        if (retryPolicy != RetryPolicy.NONE) {
+            if (retryPolicy != RetryPolicy.QUERY && isEnableDynamicFiltering(session)) {
+                throw new TrinoException(NOT_SUPPORTED, "Dynamic filtering is not supported with automatic task retries enabled");
+            }
+        }
+        return retryPolicy;
+    }
+
+    public static int getRetryAttempts(Session session)
+    {
+        return session.getSystemProperty(RETRY_ATTEMPTS, Integer.class);
+    }
+
+    public static Duration getRetryInitialDelay(Session session)
+    {
+        return session.getSystemProperty(RETRY_INITIAL_DELAY, Duration.class);
+    }
+
+    public static Duration getRetryMaxDelay(Session session)
+    {
+        return session.getSystemProperty(RETRY_MAX_DELAY, Duration.class);
+    }
+
+    public static boolean isHideInaccesibleColumns(Session session)
+    {
+        return session.getSystemProperty(HIDE_INACCESSIBLE_COLUMNS, Boolean.class);
     }
 }

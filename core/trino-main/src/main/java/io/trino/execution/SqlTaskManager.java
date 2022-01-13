@@ -42,11 +42,13 @@ import io.trino.memory.NodeMemoryConfig;
 import io.trino.memory.QueryContext;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
+import io.trino.spi.VersionEmbedder;
+import io.trino.spi.predicate.Domain;
 import io.trino.spiller.LocalSpillManager;
 import io.trino.spiller.NodeSpillConfig;
 import io.trino.sql.planner.LocalExecutionPlanner;
 import io.trino.sql.planner.PlanFragment;
-import io.trino.version.EmbedVersion;
+import io.trino.sql.planner.plan.DynamicFilterId;
 import org.joda.time.DateTime;
 import org.weakref.jmx.Flatten;
 import org.weakref.jmx.Managed;
@@ -59,9 +61,9 @@ import javax.inject.Inject;
 
 import java.io.Closeable;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -90,7 +92,7 @@ public class SqlTaskManager
 {
     private static final Logger log = Logger.get(SqlTaskManager.class);
 
-    private final EmbedVersion embedVersion;
+    private final VersionEmbedder versionEmbedder;
     private final ExecutorService taskNotificationExecutor;
     private final ThreadPoolExecutorMBean taskNotificationExecutorMBean;
 
@@ -119,7 +121,7 @@ public class SqlTaskManager
 
     @Inject
     public SqlTaskManager(
-            EmbedVersion embedVersion,
+            VersionEmbedder versionEmbedder,
             LocalExecutionPlanner planner,
             LocationFactory locationFactory,
             TaskExecutor taskExecutor,
@@ -141,7 +143,7 @@ public class SqlTaskManager
         DataSize maxBufferSize = config.getSinkMaxBufferSize();
         DataSize maxBroadcastBufferSize = config.getSinkMaxBroadcastBufferSize();
 
-        this.embedVersion = requireNonNull(embedVersion, "embedVersion is null");
+        this.versionEmbedder = requireNonNull(versionEmbedder, "versionEmbedder is null");
         taskNotificationExecutor = newFixedThreadPool(config.getTaskNotificationThreads(), threadsNamed("task-notification-%s"));
         taskNotificationExecutorMBean = new ThreadPoolExecutorMBean((ThreadPoolExecutor) taskNotificationExecutor);
 
@@ -204,7 +206,7 @@ public class SqlTaskManager
         }
         currentMemoryPoolAssignmentVersion = assignments.getVersion();
         if (coordinatorId != null && !coordinatorId.equals(assignments.getCoordinatorId())) {
-            log.warn("Switching coordinator affinity from " + coordinatorId + " to " + assignments.getCoordinatorId());
+            log.warn("Switching coordinator affinity from %s to %s", coordinatorId, assignments.getCoordinatorId());
         }
         coordinatorId = assignments.getCoordinatorId();
 
@@ -367,10 +369,16 @@ public class SqlTaskManager
     }
 
     @Override
-    public TaskInfo updateTask(Session session, TaskId taskId, Optional<PlanFragment> fragment, List<TaskSource> sources, OutputBuffers outputBuffers, OptionalInt totalPartitions)
+    public TaskInfo updateTask(
+            Session session,
+            TaskId taskId,
+            Optional<PlanFragment> fragment,
+            List<TaskSource> sources,
+            OutputBuffers outputBuffers,
+            Map<DynamicFilterId, Domain> dynamicFilterDomains)
     {
         try {
-            return embedVersion.embedVersion(() -> doUpdateTask(session, taskId, fragment, sources, outputBuffers, totalPartitions)).call();
+            return versionEmbedder.embedVersion(() -> doUpdateTask(session, taskId, fragment, sources, outputBuffers, dynamicFilterDomains)).call();
         }
         catch (Exception e) {
             throwIfUnchecked(e);
@@ -379,7 +387,13 @@ public class SqlTaskManager
         }
     }
 
-    private TaskInfo doUpdateTask(Session session, TaskId taskId, Optional<PlanFragment> fragment, List<TaskSource> sources, OutputBuffers outputBuffers, OptionalInt totalPartitions)
+    private TaskInfo doUpdateTask(
+            Session session,
+            TaskId taskId,
+            Optional<PlanFragment> fragment,
+            List<TaskSource> sources,
+            OutputBuffers outputBuffers,
+            Map<DynamicFilterId, Domain> dynamicFilterDomains)
     {
         requireNonNull(session, "session is null");
         requireNonNull(taskId, "taskId is null");
@@ -400,7 +414,7 @@ public class SqlTaskManager
         }
 
         sqlTask.recordHeartbeat();
-        return sqlTask.updateTask(session, fragment, sources, outputBuffers, totalPartitions);
+        return sqlTask.updateTask(session, fragment, sources, outputBuffers, dynamicFilterDomains);
     }
 
     @Override
@@ -447,6 +461,15 @@ public class SqlTaskManager
         requireNonNull(taskId, "taskId is null");
 
         return tasks.getUnchecked(taskId).abort();
+    }
+
+    @Override
+    public TaskInfo failTask(TaskId taskId, Throwable failure)
+    {
+        requireNonNull(taskId, "taskId is null");
+        requireNonNull(failure, "failure is null");
+
+        return tasks.getUnchecked(taskId).failed(failure);
     }
 
     public void removeOldTasks()
@@ -517,6 +540,18 @@ public class SqlTaskManager
     {
         requireNonNull(taskId, "taskId is null");
         tasks.getUnchecked(taskId).addStateChangeListener(stateChangeListener);
+    }
+
+    @Override
+    public void addSourceTaskFailureListener(TaskId taskId, TaskFailureListener listener)
+    {
+        tasks.getUnchecked(taskId).addSourceTaskFailureListener(listener);
+    }
+
+    @Override
+    public Optional<String> getTraceToken(TaskId taskId)
+    {
+        return tasks.getUnchecked(taskId).getTraceToken();
     }
 
     @VisibleForTesting

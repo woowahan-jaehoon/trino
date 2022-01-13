@@ -2,8 +2,8 @@
 CLI Kerberos authentication
 ===========================
 
-The Trino :doc:`/installation/cli` can connect to a :doc:`Trino coordinator
-</security/server>`, that has Kerberos authentication enabled.
+The Trino :doc:`/installation/cli` can connect to a Trino cluster that has
+:doc:`kerberos` enabled.
 
 Environment configuration
 -------------------------
@@ -90,10 +90,11 @@ Additional Kerberos debugging information
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 You can enable additional Kerberos debugging information for the Trino CLI
-process by passing ``-Dsun.security.krb5.debug=true`` as a JVM argument, when
-starting the CLI process. Doing so requires invoking the CLI JAR via ``java``
-instead of running the self-executable JAR directly. The self-executable jar
-file cannot pass the option to the JVM.
+process by passing ``-Dsun.security.krb5.debug=true``,
+``-Dtrino.client.debugKerberos=true``, and
+``-Djava.security.debug=gssloginconfig,configfile,configparser,logincontext``
+as a JVM argument, when starting the CLI process. Doing so requires invoking
+the CLI JAR via ``java`` instead of running the self-executable JAR directly.
 
 .. code-block:: text
 
@@ -101,6 +102,8 @@ file cannot pass the option to the JVM.
 
     java \
       -Dsun.security.krb5.debug=true \
+      -Djava.security.debug=gssloginconfig,configfile,configparser,logincontext \
+      -Dtrino.client.debugKerberos=true \
       -jar trino-cli-*-executable.jar \
       --server https://trino-coordinator.example.com:7778 \
       --krb5-config-path /etc/krb5.conf \
@@ -115,3 +118,10 @@ file cannot pass the option to the JVM.
 The :ref:`additional resources <server_additional_resources>` listed in the
 documentation for setting up Kerberos authentication for the Trino coordinator
 may be of help when interpreting the Kerberos debugging messages.
+
+See `Troubleshooting Security
+<https://docs.oracle.com/en/java/javase/11/security/troubleshooting-security.html>`_
+in the Java documentation for more details about
+the ``-Djava.security.debug`` flag, and `Troubleshooting
+<https://docs.oracle.com/en/java/javase/11/security/troubleshooting.html>`_
+for more details about the Java GSS-API and Kerberos issues.

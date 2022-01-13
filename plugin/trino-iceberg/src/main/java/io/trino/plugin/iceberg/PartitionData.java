@@ -20,13 +20,17 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.Types;
 
 import java.io.IOException;
 import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.UUID;
 
+import static io.trino.spi.type.DecimalType.createDecimalType;
+import static io.trino.spi.type.Decimals.rescale;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -141,6 +145,8 @@ public class PartitionData
                 return partitionValue.doubleValue();
             case STRING:
                 return partitionValue.asText();
+            case UUID:
+                return UUID.fromString(partitionValue.asText());
             case FIXED:
             case BINARY:
                 try {
@@ -150,8 +156,10 @@ public class PartitionData
                     throw new UncheckedIOException("Failed during JSON conversion of " + partitionValue, e);
                 }
             case DECIMAL:
-                return partitionValue.decimalValue();
-            case UUID:
+                Types.DecimalType decimalType = (Types.DecimalType) type;
+                return rescale(
+                        partitionValue.decimalValue(),
+                        createDecimalType(decimalType.precision(), decimalType.scale()));
             case LIST:
             case MAP:
             case STRUCT:

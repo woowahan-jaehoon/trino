@@ -13,22 +13,26 @@
  */
 package io.trino.plugin.jdbc;
 
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.inject.Binder;
 import com.google.inject.Key;
-import com.google.inject.Module;
-import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.multibindings.Multibinder;
+import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.trino.plugin.base.CatalogName;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
+import io.trino.plugin.jdbc.mapping.IdentifierMappingModule;
+import io.trino.plugin.jdbc.procedure.FlushJdbcMetadataCacheProcedure;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorRecordSetProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.procedure.Procedure;
 
+import javax.annotation.PreDestroy;
 import javax.inject.Provider;
-import javax.inject.Singleton;
+
+import java.util.concurrent.ExecutorService;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
@@ -36,7 +40,7 @@ import static io.airlift.configuration.ConfigBinder.configBinder;
 import static java.util.Objects.requireNonNull;
 
 public class JdbcModule
-        implements Module
+        extends AbstractConfigurationAwareModule
 {
     private final String catalogName;
 
@@ -46,38 +50,48 @@ public class JdbcModule
     }
 
     @Override
-    public void configure(Binder binder)
+    public void setup(Binder binder)
     {
         binder.bind(CatalogName.class).toInstance(new CatalogName(catalogName));
-        binder.install(new JdbcDiagnosticModule());
+        install(new JdbcDiagnosticModule());
+        install(new IdentifierMappingModule());
 
         newOptionalBinder(binder, ConnectorAccessControl.class);
 
         procedureBinder(binder);
         tablePropertiesProviderBinder(binder);
 
-        binder.bind(JdbcMetadataFactory.class).in(Scopes.SINGLETON);
+        newOptionalBinder(binder, JdbcMetadataFactory.class).setDefault().to(DefaultJdbcMetadataFactory.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, ConnectorSplitManager.class).setDefault().to(JdbcSplitManager.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, ConnectorRecordSetProvider.class).setDefault().to(JdbcRecordSetProvider.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, ConnectorPageSinkProvider.class).setDefault().to(JdbcPageSinkProvider.class).in(Scopes.SINGLETON);
         binder.bind(JdbcConnector.class).in(Scopes.SINGLETON);
         configBinder(binder).bindConfig(JdbcMetadataConfig.class);
+        configBinder(binder).bindConfig(JdbcWriteConfig.class);
         configBinder(binder).bindConfig(BaseJdbcConfig.class);
 
         configBinder(binder).bindConfig(TypeHandlingJdbcConfig.class);
         bindSessionPropertiesProvider(binder, TypeHandlingJdbcSessionProperties.class);
         bindSessionPropertiesProvider(binder, JdbcMetadataSessionProperties.class);
+        bindSessionPropertiesProvider(binder, JdbcWriteSessionProperties.class);
 
-        binder.bind(JdbcClient.class).to(CachingJdbcClient.class).in(Scopes.SINGLETON);
+        binder.bind(CachingJdbcClient.class).in(Scopes.SINGLETON);
+        binder.bind(JdbcClient.class).to(Key.get(CachingJdbcClient.class)).in(Scopes.SINGLETON);
+
+        newSetBinder(binder, Procedure.class).addBinding().toProvider(FlushJdbcMetadataCacheProcedure.class).in(Scopes.SINGLETON);
+
+        binder.bind(ConnectionFactory.class)
+                .annotatedWith(ForLazyConnectionFactory.class)
+                .to(Key.get(ConnectionFactory.class, StatsCollecting.class))
+                .in(Scopes.SINGLETON);
+        binder.bind(ConnectionFactory.class).to(LazyConnectionFactory.class).in(Scopes.SINGLETON);
 
         newOptionalBinder(binder, Key.get(int.class, MaxDomainCompactionThreshold.class));
-    }
 
-    @Provides
-    @Singleton
-    public ConnectionFactory createConnectionFactory(@StatsCollecting ConnectionFactory connectionFactory)
-    {
-        return new LazyConnectionFactory(connectionFactory);
+        newOptionalBinder(binder, Key.get(ExecutorService.class, ForRecordCursor.class))
+                .setDefault()
+                .toProvider(MoreExecutors::newDirectExecutorService)
+                .in(Scopes.SINGLETON);
     }
 
     public static Multibinder<SessionPropertiesProvider> sessionPropertiesProviderBinder(Binder binder)
@@ -108,5 +122,11 @@ public class JdbcModule
     public static void bindTablePropertiesProvider(Binder binder, Class<? extends TablePropertiesProvider> type)
     {
         tablePropertiesProviderBinder(binder).addBinding().to(type).in(Scopes.SINGLETON);
+    }
+
+    @PreDestroy
+    public void shutdownRecordCursorExecutor(@ForRecordCursor ExecutorService executor)
+    {
+        executor.shutdownNow();
     }
 }

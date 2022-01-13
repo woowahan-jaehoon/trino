@@ -19,14 +19,13 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import io.trino.metadata.Metadata;
-import io.trino.metadata.MetadataManager;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.scalar.TryFunction;
 import io.trino.sql.ExpressionUtils;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
 import io.trino.sql.tree.ArrayConstructor;
 import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.IfExpression;
 import io.trino.sql.tree.InListExpression;
@@ -56,7 +55,6 @@ import static com.google.common.base.Predicates.not;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.QueryUtil.identifier;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
 import static io.trino.sql.planner.EqualityInference.isInferenceCandidate;
 import static io.trino.sql.tree.ComparisonExpression.Operator.EQUAL;
@@ -68,7 +66,8 @@ import static org.testng.Assert.assertTrue;
 
 public class TestEqualityInference
 {
-    private final Metadata metadata = MetadataManager.createTestMetadataManager();
+    private final TestingFunctionResolution functionResolution = new TestingFunctionResolution();
+    private final Metadata metadata = functionResolution.getMetadata();
 
     @Test
     public void testTransitivity()
@@ -316,13 +315,12 @@ public class TestEqualityInference
     {
         List<Expression> candidates = ImmutableList.of(
                 new Cast(nameReference("b"), toSqlType(BIGINT), true), // try_cast
-                new FunctionCallBuilder(metadata)
-                        .setName(QualifiedName.of(TryFunction.NAME))
+                functionResolution
+                        .functionCallBuilder(QualifiedName.of(TryFunction.NAME))
                         .addArgument(new FunctionType(ImmutableList.of(), VARCHAR), new LambdaExpression(ImmutableList.of(), nameReference("b")))
                         .build(),
                 new NullIfExpression(nameReference("b"), number(1)),
                 new IfExpression(nameReference("b"), number(1), new NullLiteral()),
-                new DereferenceExpression(nameReference("b"), identifier("x")),
                 new InPredicate(nameReference("b"), new InListExpression(ImmutableList.of(new NullLiteral()))),
                 new SearchedCaseExpression(ImmutableList.of(new WhenClause(new IsNotNullPredicate(nameReference("b")), new NullLiteral())), Optional.empty()),
                 new SimpleCaseExpression(nameReference("b"), ImmutableList.of(new WhenClause(number(1), new NullLiteral())), Optional.empty()),

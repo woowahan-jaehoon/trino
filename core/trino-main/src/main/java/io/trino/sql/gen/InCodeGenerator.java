@@ -25,9 +25,6 @@ import io.airlift.bytecode.control.IfStatement;
 import io.airlift.bytecode.control.SwitchStatement.SwitchBuilder;
 import io.airlift.bytecode.instruction.LabelNode;
 import io.trino.metadata.ResolvedFunction;
-import io.trino.spi.type.BigintType;
-import io.trino.spi.type.DateType;
-import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.Type;
 import io.trino.sql.relational.ConstantExpression;
 import io.trino.sql.relational.RowExpression;
@@ -91,14 +88,13 @@ public class InCodeGenerator
     @VisibleForTesting
     static SwitchGenerationCase checkSwitchGenerationCase(Type type, List<RowExpression> values)
     {
-        if (values.size() > 32) {
-            // 32 is chosen because
-            // * SET_CONTAINS performs worst when smaller than but close to power of 2
-            // * Benchmark shows performance of SET_CONTAINS is better at 50, but similar at 25.
+        if (values.size() >= 8) {
+            // SET_CONTAINS is generally faster for not super tiny IN lists.
+            // Tipping point is between 5 and 10 (using round 8)
             return SwitchGenerationCase.SET_CONTAINS;
         }
 
-        if (!(type instanceof IntegerType || type instanceof BigintType || type instanceof DateType)) {
+        if (type.getJavaType() != long.class) {
             return SwitchGenerationCase.HASH_SWITCH;
         }
         for (RowExpression expression : values) {

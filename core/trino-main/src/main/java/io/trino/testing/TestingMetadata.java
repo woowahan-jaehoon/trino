@@ -33,6 +33,8 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableProperties;
 import io.trino.spi.connector.ConnectorViewDefinition;
+import io.trino.spi.connector.MaterializedViewFreshness;
+import io.trino.spi.connector.MaterializedViewNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.ViewNotFoundException;
@@ -53,8 +55,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
+import static java.util.Collections.synchronizedSet;
 import static java.util.Objects.requireNonNull;
 
 public class TestingMetadata
@@ -63,6 +67,7 @@ public class TestingMetadata
     private final ConcurrentMap<SchemaTableName, ConnectorTableMetadata> tables = new ConcurrentHashMap<>();
     private final ConcurrentMap<SchemaTableName, ConnectorViewDefinition> views = new ConcurrentHashMap<>();
     private final ConcurrentMap<SchemaTableName, ConnectorMaterializedViewDefinition> materializedViews = new ConcurrentHashMap<>();
+    private final Set<SchemaTableName> freshMaterializedViews = synchronizedSet(new HashSet<>());
 
     @Override
     public List<String> listSchemaNames(ConnectorSession session)
@@ -235,9 +240,39 @@ public class TestingMetadata
     }
 
     @Override
+    public void renameMaterializedView(ConnectorSession session, SchemaTableName source, SchemaTableName target)
+    {
+        // TODO: use locking to do this properly
+        ConnectorMaterializedViewDefinition materializedView = getMaterializedView(session, source).orElseThrow();
+        if (materializedViews.putIfAbsent(target, materializedView) != null) {
+            throw new IllegalArgumentException("Target materialized view already exists: " + target);
+        }
+        materializedViews.remove(source, materializedView);
+    }
+
+    @Override
     public Optional<ConnectorMaterializedViewDefinition> getMaterializedView(ConnectorSession session, SchemaTableName viewName)
     {
         return Optional.ofNullable(materializedViews.get(viewName));
+    }
+
+    @Override
+    public void dropMaterializedView(ConnectorSession session, SchemaTableName viewName)
+    {
+        if (materializedViews.remove(viewName) == null) {
+            throw new MaterializedViewNotFoundException(viewName);
+        }
+    }
+
+    @Override
+    public MaterializedViewFreshness getMaterializedViewFreshness(ConnectorSession session, SchemaTableName name)
+    {
+        return new MaterializedViewFreshness(freshMaterializedViews.contains(name));
+    }
+
+    public void markMaterializedViewIsFresh(SchemaTableName name)
+    {
+        freshMaterializedViews.add(name);
     }
 
     @Override
@@ -417,6 +452,16 @@ public class TestingMetadata
         public int hashCode()
         {
             return Objects.hash(name, ordinalPosition, type);
+        }
+
+        @Override
+        public String toString()
+        {
+            return toStringHelper(this)
+                    .addValue(ordinalPosition)
+                    .add("name", name)
+                    .add("type", type)
+                    .toString();
         }
     }
 }

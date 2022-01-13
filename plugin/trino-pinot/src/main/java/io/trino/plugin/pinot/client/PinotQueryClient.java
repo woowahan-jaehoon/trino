@@ -13,10 +13,10 @@
  */
 package io.trino.plugin.pinot.client;
 
-import com.yammer.metrics.core.MetricsRegistry;
 import io.trino.plugin.pinot.PinotException;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.pinot.common.metrics.BrokerMetrics;
+import org.apache.pinot.common.metrics.PinotMetricUtils;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.utils.DataTable;
 import org.apache.pinot.core.transport.AsyncQueryResponse;
@@ -24,6 +24,7 @@ import org.apache.pinot.core.transport.QueryRouter;
 import org.apache.pinot.core.transport.ServerInstance;
 import org.apache.pinot.core.transport.ServerResponse;
 import org.apache.pinot.core.transport.ServerRoutingInstance;
+import org.apache.pinot.spi.metrics.PinotMetricsRegistry;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.sql.parsers.CalciteSqlCompiler;
 import org.apache.pinot.sql.parsers.SqlCompilationException;
@@ -48,11 +49,10 @@ import static java.util.Objects.requireNonNull;
 public class PinotQueryClient
 {
     private static final CalciteSqlCompiler REQUEST_COMPILER = new CalciteSqlCompiler();
-    private static final String PRESTO_HOST_PREFIX = "presto-pinot-master";
+    private static final String TRINO_HOST_PREFIX = "trino-pinot-master";
     private static final String SERVER_INSTANCE_PREFIX = "Server";
-    private static final boolean DEFAULT_EMIT_TABLE_LEVEL_METRICS = true;
 
-    private final String prestoHostId;
+    private final String trinoHostId;
     private final BrokerMetrics brokerMetrics;
     private final QueryRouter queryRouter;
     private final PinotHostMapper pinotHostMapper;
@@ -61,22 +61,22 @@ public class PinotQueryClient
     @Inject
     public PinotQueryClient(PinotHostMapper pinotHostMapper)
     {
-        prestoHostId = getDefaultPrestoId();
+        trinoHostId = getDefaultTrinoId();
         this.pinotHostMapper = requireNonNull(pinotHostMapper, "pinotHostMapper is null");
-        MetricsRegistry registry = new MetricsRegistry();
-        this.brokerMetrics = new BrokerMetrics(registry, DEFAULT_EMIT_TABLE_LEVEL_METRICS);
+        PinotMetricsRegistry registry = PinotMetricUtils.getPinotMetricsRegistry();
+        this.brokerMetrics = new BrokerMetrics(registry);
         brokerMetrics.initializeGlobalMeters();
-        queryRouter = new QueryRouter(prestoHostId, brokerMetrics);
+        queryRouter = new QueryRouter(trinoHostId, brokerMetrics);
     }
 
-    private static String getDefaultPrestoId()
+    private static String getDefaultTrinoId()
     {
         String defaultBrokerId;
         try {
-            defaultBrokerId = PRESTO_HOST_PREFIX + InetAddress.getLocalHost().getHostName();
+            defaultBrokerId = TRINO_HOST_PREFIX + InetAddress.getLocalHost().getHostName();
         }
         catch (UnknownHostException e) {
-            defaultBrokerId = PRESTO_HOST_PREFIX;
+            defaultBrokerId = TRINO_HOST_PREFIX;
         }
         return defaultBrokerId;
     }
@@ -133,7 +133,7 @@ public class PinotQueryClient
                 if (firstError == null) {
                     firstError = e;
                 }
-                if (!e.isRetriable()) {
+                if (!e.isRetryable()) {
                     throw e;
                 }
             }

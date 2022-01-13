@@ -16,9 +16,9 @@ package io.trino.plugin.jdbc;
 import com.google.common.cache.CacheStats;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import io.airlift.units.Duration;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
+import io.trino.plugin.jdbc.credential.ExtraCredentialConfig;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
@@ -26,6 +26,7 @@ import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
@@ -34,7 +35,6 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -65,7 +65,7 @@ public class TestCachingJdbcClient
                     null,
                     false));
 
-    public static final Set<SessionPropertiesProvider> SESSION_PROPERTIES_PROVIDERS = Set.of(() -> PROPERTY_METADATA);
+    private static final Set<SessionPropertiesProvider> SESSION_PROPERTIES_PROVIDERS = Set.of(() -> PROPERTY_METADATA);
 
     private static final ConnectorSession SESSION = TestingConnectorSession.builder()
             .setPropertyMetadata(PROPERTY_METADATA)
@@ -85,19 +85,19 @@ public class TestCachingJdbcClient
             throws Exception
     {
         database = new TestingDatabase();
-        cachingJdbcClient = createCachingJdbcClient(true);
+        cachingJdbcClient = createCachingJdbcClient(true, 10000);
         jdbcClient = database.getJdbcClient();
         schema = jdbcClient.getSchemaNames(SESSION).iterator().next();
     }
 
-    private CachingJdbcClient createCachingJdbcClient(Duration cacheTtl, boolean cacheMissing)
+    private CachingJdbcClient createCachingJdbcClient(Duration cacheTtl, boolean cacheMissing, long cacheMaximumSize)
     {
-        return new CachingJdbcClient(database.getJdbcClient(), SESSION_PROPERTIES_PROVIDERS, cacheTtl, cacheMissing);
+        return new CachingJdbcClient(database.getJdbcClient(), SESSION_PROPERTIES_PROVIDERS, new SingletonIdentityCacheMapping(), cacheTtl, cacheMissing, cacheMaximumSize);
     }
 
-    private CachingJdbcClient createCachingJdbcClient(boolean cacheMissing)
+    private CachingJdbcClient createCachingJdbcClient(boolean cacheMissing, long cacheMaximumSize)
     {
-        return createCachingJdbcClient(FOREVER, cacheMissing);
+        return createCachingJdbcClient(FOREVER, cacheMissing, cacheMaximumSize);
     }
 
     @AfterMethod(alwaysRun = true)
@@ -161,7 +161,7 @@ public class TestCachingJdbcClient
     @Test
     public void testEmptyTableHandleNotCachedWhenCacheMissingIsFalse()
     {
-        CachingJdbcClient cachingJdbcClient = createCachingJdbcClient(false);
+        CachingJdbcClient cachingJdbcClient = createCachingJdbcClient(false, 10000);
         SchemaTableName phantomTable = new SchemaTableName(schema, "phantom_table");
 
         assertThat(cachingJdbcClient.getTableHandle(SESSION, phantomTable)).isEmpty();
@@ -298,7 +298,7 @@ public class TestCachingJdbcClient
     @Test
     public void testColumnsNotCachedWhenCacheDisabled()
     {
-        CachingJdbcClient cachingJdbcClient = createCachingJdbcClient(ZERO, true);
+        CachingJdbcClient cachingJdbcClient = createCachingJdbcClient(ZERO, true, 10000);
         ConnectorSession firstSession = createSession("first");
         ConnectorSession secondSession = createSession("second");
 
@@ -335,7 +335,7 @@ public class TestCachingJdbcClient
     @Test
     public void testGetTableStatistics()
     {
-        CachingJdbcClient cachingJdbcClient = cachingStatisticsAwareJdbcClient(FOREVER, true);
+        CachingJdbcClient cachingJdbcClient = cachingStatisticsAwareJdbcClient(FOREVER, true, 10000);
         ConnectorSession session = createSession("first");
 
         JdbcTableHandle first = createTable(new SchemaTableName(schema, "first"));
@@ -383,7 +383,7 @@ public class TestCachingJdbcClient
     @Test
     public void testCacheGetTableStatisticsWithQueryRelationHandle()
     {
-        CachingJdbcClient cachingJdbcClient = cachingStatisticsAwareJdbcClient(FOREVER, true);
+        CachingJdbcClient cachingJdbcClient = cachingStatisticsAwareJdbcClient(FOREVER, true, 10000);
         ConnectorSession session = createSession("some test session name");
 
         JdbcTableHandle first = createTable(new SchemaTableName(schema, "first"));
@@ -424,7 +424,42 @@ public class TestCachingJdbcClient
         });
     }
 
-    private CachingJdbcClient cachingStatisticsAwareJdbcClient(Duration duration, boolean cacheMissing)
+    @Test
+    public void testTruncateTable()
+    {
+        CachingJdbcClient cachingJdbcClient = cachingStatisticsAwareJdbcClient(FOREVER, true, 10000);
+        ConnectorSession session = createSession("table");
+
+        JdbcTableHandle table = createTable(new SchemaTableName(schema, "table"));
+
+        // load
+        assertStatisticsCacheStats(cachingJdbcClient).misses(1).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableStatistics(session, table, TupleDomain.all())).isEqualTo(NON_EMPTY_STATS);
+        });
+
+        // read from cache
+        assertStatisticsCacheStats(cachingJdbcClient).hits(1).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableStatistics(session, table, TupleDomain.all())).isEqualTo(NON_EMPTY_STATS);
+        });
+
+        // invalidate
+        cachingJdbcClient.truncateTable(SESSION, table);
+
+        // load again
+        assertStatisticsCacheStats(cachingJdbcClient).misses(1).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableStatistics(session, table, TupleDomain.all())).isEqualTo(NON_EMPTY_STATS);
+        });
+
+        // read from cache
+        assertStatisticsCacheStats(cachingJdbcClient).hits(1).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableStatistics(session, table, TupleDomain.all())).isEqualTo(NON_EMPTY_STATS);
+        });
+
+        // cleanup
+        this.jdbcClient.dropTable(SESSION, table);
+    }
+
+    private CachingJdbcClient cachingStatisticsAwareJdbcClient(Duration duration, boolean cacheMissing, long cacheMaximumSize)
     {
         JdbcClient jdbcClient = database.getJdbcClient();
         JdbcClient statsAwareJdbcClient = new ForwardingJdbcClient()
@@ -441,13 +476,13 @@ public class TestCachingJdbcClient
                 return NON_EMPTY_STATS;
             }
         };
-        return new CachingJdbcClient(statsAwareJdbcClient, SESSION_PROPERTIES_PROVIDERS, duration, cacheMissing);
+        return new CachingJdbcClient(statsAwareJdbcClient, SESSION_PROPERTIES_PROVIDERS, new SingletonIdentityCacheMapping(), duration, cacheMissing, cacheMaximumSize);
     }
 
     @Test
     public void testCacheEmptyStatistics()
     {
-        CachingJdbcClient cachingJdbcClient = createCachingJdbcClient(FOREVER, true);
+        CachingJdbcClient cachingJdbcClient = createCachingJdbcClient(FOREVER, true, 10000);
         ConnectorSession session = createSession("table");
         JdbcTableHandle table = createTable(new SchemaTableName(schema, "table"));
 
@@ -466,7 +501,7 @@ public class TestCachingJdbcClient
     @Test
     public void testGetTableStatisticsDoNotCacheEmptyWhenCachingMissingIsDisabled()
     {
-        CachingJdbcClient cachingJdbcClient = createCachingJdbcClient(FOREVER, false);
+        CachingJdbcClient cachingJdbcClient = createCachingJdbcClient(FOREVER, false, 10000);
         ConnectorSession session = createSession("table");
         JdbcTableHandle table = createTable(new SchemaTableName(schema, "table"));
 
@@ -480,6 +515,73 @@ public class TestCachingJdbcClient
 
         // cleanup
         this.jdbcClient.dropTable(SESSION, table);
+    }
+
+    @Test
+    public void testDifferentIdentityKeys()
+    {
+        CachingJdbcClient cachingJdbcClient = new CachingJdbcClient(
+                database.getJdbcClient(),
+                SESSION_PROPERTIES_PROVIDERS,
+                new ExtraCredentialsBasedIdentityCacheMapping(new ExtraCredentialConfig()
+                        .setUserCredentialName("user")
+                        .setPasswordCredentialName("password")),
+                FOREVER,
+                true,
+                10000);
+        ConnectorSession alice = createUserSession("alice");
+        ConnectorSession bob = createUserSession("bob");
+
+        JdbcTableHandle table = createTable(new SchemaTableName(schema, "table"));
+
+        assertTableNamesCache(cachingJdbcClient).loads(2).misses(2).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableNames(alice, Optional.empty())).contains(table.getRequiredNamedRelation().getSchemaTableName());
+            assertThat(cachingJdbcClient.getTableNames(bob, Optional.empty())).contains(table.getRequiredNamedRelation().getSchemaTableName());
+        });
+
+        assertTableNamesCache(cachingJdbcClient).hits(2).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableNames(alice, Optional.empty())).contains(table.getRequiredNamedRelation().getSchemaTableName());
+            assertThat(cachingJdbcClient.getTableNames(bob, Optional.empty())).contains(table.getRequiredNamedRelation().getSchemaTableName());
+        });
+
+        // Drop tables by not using caching jdbc client
+        jdbcClient.dropTable(SESSION, table);
+    }
+
+    @Test
+    public void testFlushCache()
+    {
+        CachingJdbcClient cachingJdbcClient = cachingStatisticsAwareJdbcClient(FOREVER, true, 10000);
+        ConnectorSession session = createSession("asession");
+
+        JdbcTableHandle first = createTable(new SchemaTableName(schema, "atable"));
+
+        // load table
+        assertStatisticsCacheStats(cachingJdbcClient).misses(1).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableStatistics(session, first, TupleDomain.all())).isEqualTo(NON_EMPTY_STATS);
+        });
+
+        // read from cache
+        assertStatisticsCacheStats(cachingJdbcClient).hits(1).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableStatistics(session, first, TupleDomain.all())).isEqualTo(NON_EMPTY_STATS);
+        });
+
+        // flush cache
+        cachingJdbcClient.flushCache();
+        JdbcTableHandle secondFirst = createTable(new SchemaTableName(schema, "first"));
+
+        // load table again
+        assertStatisticsCacheStats(cachingJdbcClient).misses(1).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableStatistics(session, secondFirst, TupleDomain.all())).isEqualTo(NON_EMPTY_STATS);
+        });
+
+        // read table from cache
+        assertStatisticsCacheStats(cachingJdbcClient).hits(1).afterRunning(() -> {
+            assertThat(cachingJdbcClient.getTableStatistics(session, secondFirst, TupleDomain.all())).isEqualTo(NON_EMPTY_STATS);
+        });
+
+        // cleanup
+        jdbcClient.dropTable(SESSION, first);
     }
 
     private JdbcTableHandle getAnyTable(String schema)
@@ -516,22 +618,24 @@ public class TestCachingJdbcClient
                 .build();
     }
 
+    private static ConnectorSession createUserSession(String userName)
+    {
+        return builder()
+                .setIdentity(ConnectorIdentity.forUser(userName)
+                        .withExtraCredentials(ImmutableMap.of("user", userName))
+                        .build())
+                .build();
+    }
+
     @Test
     public void testEverythingImplemented()
     {
-        assertAllMethodsOverridden(JdbcClient.class, CachingJdbcClient.class, nonOverriddenMethods());
+        assertAllMethodsOverridden(JdbcClient.class, CachingJdbcClient.class);
     }
 
-    private static Set<Method> nonOverriddenMethods()
+    private static CacheStatsAssertions assertTableNamesCache(CachingJdbcClient cachingJdbcClient)
     {
-        try {
-            return ImmutableSet.<Method>builder()
-                    .add(JdbcClient.class.getMethod("schemaExists", ConnectorSession.class, String.class))
-                    .build();
-        }
-        catch (NoSuchMethodException e) {
-            throw new AssertionError(e);
-        }
+        return new CacheStatsAssertions(cachingJdbcClient::getTableNamesCacheStats);
     }
 
     private static CacheStatsAssertions assertColumnCacheStats(CachingJdbcClient client)

@@ -141,7 +141,7 @@ public interface ThriftMetastoreClient
     boolean grantPrivileges(PrivilegeBag privilegeBag)
             throws TException;
 
-    boolean revokePrivileges(PrivilegeBag privilegeBag)
+    boolean revokePrivileges(PrivilegeBag privilegeBag, boolean revokeGrantOption)
             throws TException;
 
     void grantRole(String role, String granteeName, PrincipalType granteeType, String grantorName, PrincipalType grantorType, boolean grantOption)
@@ -180,10 +180,13 @@ public interface ThriftMetastoreClient
     LockResponse checkLock(long lockId)
             throws TException;
 
+    void unlock(long lockId)
+            throws TException;
+
     String getValidWriteIds(List<String> tableList, long currentTransactionId)
             throws TException;
 
-    String get_config_value(String name, String defaultValue)
+    String getConfigValue(String name, String defaultValue)
             throws TException;
 
     String getDelegationToken(String userName)

@@ -31,19 +31,16 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 import org.testng.annotations.Test;
 
-import java.io.IOException;
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+import static com.google.common.io.Resources.getResource;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -75,7 +72,7 @@ public class BenchmarkSpatialJoin
 
         @Setup
         public void setUp()
-                throws IOException
+                throws Exception
         {
             queryRunner = LocalQueryRunner.create(testSessionBuilder()
                     .setCatalog("memory")
@@ -84,7 +81,7 @@ public class BenchmarkSpatialJoin
             queryRunner.installPlugin(new GeoPlugin());
             queryRunner.createCatalog("memory", new MemoryConnectorFactory(), ImmutableMap.of());
 
-            Path path = Paths.get(BenchmarkSpatialJoin.class.getClassLoader().getResource("us-states.tsv").getPath());
+            Path path = new File(getResource("us-states.tsv").toURI()).toPath();
             String polygonValues = Files.lines(path)
                     .map(line -> line.split("\t"))
                     .map(parts -> format("('%s', '%s')", parts[0], parts[1]))
@@ -139,7 +136,7 @@ public class BenchmarkSpatialJoin
 
     @Test
     public void verify()
-            throws IOException
+            throws Exception
     {
         Context context = new Context();
         try {
@@ -161,11 +158,6 @@ public class BenchmarkSpatialJoin
         // assure the benchmarks are valid before running
         new BenchmarkSpatialJoin().verify();
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkSpatialJoin.class.getSimpleName() + ".*")
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkSpatialJoin.class).run();
     }
 }

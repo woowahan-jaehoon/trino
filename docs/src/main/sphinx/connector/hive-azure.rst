@@ -115,6 +115,9 @@ catalog configuration.
     - Value of the new client (application) secret created
   * - ``hive.azure.adl-refresh-url``
     - OAuth 2.0 token endpoint url
+  * - ``hive.azure.adl-proxy-host``
+    - Proxy host and port in ``host:port`` format. Use this property to connect
+      to an ADLS endpoint via a SOCKS proxy.
 
 Accessing Azure Storage data
 ----------------------------
@@ -133,7 +136,7 @@ ABFS URI:
 
 .. code-block:: text
 
-    abfs[s]://file_system@account_name.dfs.core.windows.net/<path>/<path>/<file_name>
+    abfs[s]://<file_system>@<account_name>.dfs.core.windows.net/<path>/<path>/<file_name>
 
 ADLS Gen1 URI:
 
@@ -145,7 +148,7 @@ Azure Standard Blob URI:
 
 .. code-block:: text
 
-    wasb[s]://container@account_name.blob.core.windows.net/<path>/<path>/<file_name>
+    wasb[s]://<container>@<account_name>.blob.core.windows.net/<path>/<path>/<file_name>
 
 Querying Azure Storage
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -173,7 +176,7 @@ need to execute a query::
          shippriority integer,
          comment varchar(79)
     ) WITH (
-         external_location = 'abfs[s]://file_system@account_name.dfs.core.windows.net/<path>/<path>/<file_name>`',
+         external_location = 'abfs[s]://<file_system>@<account_name>.dfs.core.windows.net/<path>/<path>/',
          format = 'ORC' -- or 'PARQUET'
     );
 

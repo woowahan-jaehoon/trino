@@ -15,10 +15,10 @@ package io.trino.sql.planner;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.FeaturesConfig.JoinDistributionType;
+import io.trino.FeaturesConfig.JoinReorderingStrategy;
 import io.trino.Session;
-import io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy;
 import io.trino.sql.planner.assertions.BasePlanTest;
-import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.planner.plan.TableScanNode;
 import org.testng.annotations.Test;
@@ -185,20 +185,24 @@ public class TestPlanMatchingFramework
                         values(ImmutableMap.of("VALUE", 0))));
     }
 
-    @Test(expectedExceptions = IllegalStateException.class, expectedExceptionsMessageRegExp = ".* doesn't have column .*")
+    @Test
     public void testAliasNonexistentColumn()
     {
-        assertMinimallyOptimizedPlan("SELECT orderkey FROM lineitem",
+        assertThatThrownBy(() -> assertMinimallyOptimizedPlan("SELECT orderkey FROM lineitem",
                 node(OutputNode.class,
-                        node(TableScanNode.class).withAlias("ORDERKEY", columnReference("lineitem", "NXCOLUMN"))));
+                        node(TableScanNode.class).withAlias("ORDERKEY", columnReference("lineitem", "NXCOLUMN")))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageMatching(".* doesn't have column .*");
     }
 
-    @Test(expectedExceptions = IllegalStateException.class, expectedExceptionsMessageRegExp = "missing expression for alias .*")
+    @Test
     public void testReferenceNonexistentAlias()
     {
-        assertMinimallyOptimizedPlan("SELECT orderkey FROM lineitem",
+        assertThatThrownBy(() -> assertMinimallyOptimizedPlan("SELECT orderkey FROM lineitem",
                 output(ImmutableList.of("NXALIAS"),
-                        tableScan("lineitem", ImmutableMap.of("ORDERKEY", "orderkey"))));
+                        tableScan("lineitem", ImmutableMap.of("ORDERKEY", "orderkey")))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageMatching("missing expression for alias .*");
     }
 
     @Test
@@ -233,10 +237,10 @@ public class TestPlanMatchingFramework
                 .hasMessageStartingWith("Plan does not match");
     }
 
-    @Test(expectedExceptions = IllegalStateException.class, expectedExceptionsMessageRegExp = ".*already bound to expression.*")
+    @Test
     public void testDuplicateAliases()
     {
-        assertPlan(
+        assertThatThrownBy(() -> assertPlan(
                 "SELECT o.orderkey FROM orders o, lineitem l WHERE l.orderkey = o.orderkey",
                 noJoinReordering(),
                 anyTree(
@@ -244,23 +248,27 @@ public class TestPlanMatchingFramework
                                 anyTree(
                                         tableScan("orders").withAlias("ORDERS_OK", columnReference("orders", "orderkey"))),
                                 anyTree(
-                                        tableScan("lineitem").withAlias("ORDERS_OK", columnReference("lineitem", "orderkey"))))));
+                                        tableScan("lineitem").withAlias("ORDERS_OK", columnReference("lineitem", "orderkey")))))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageMatching(".*already bound to expression.*");
     }
 
-    @Test(expectedExceptions = IllegalStateException.class, expectedExceptionsMessageRegExp = "missing expression for alias .*")
+    @Test
     public void testProjectLimitsScope()
     {
-        assertMinimallyOptimizedPlan("SELECT 1 + orderkey FROM lineitem",
+        assertThatThrownBy(() -> assertMinimallyOptimizedPlan("SELECT 1 + orderkey FROM lineitem",
                 output(ImmutableList.of("ORDERKEY"),
                         project(ImmutableMap.of("EXPRESSION", expression("CAST(1 AS bigint) + ORDERKEY")),
-                                tableScan("lineitem", ImmutableMap.of("ORDERKEY", "orderkey")))));
+                                tableScan("lineitem", ImmutableMap.of("ORDERKEY", "orderkey"))))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageMatching("missing expression for alias .*");
     }
 
     private Session noJoinReordering()
     {
         return Session.builder(getQueryRunner().getDefaultSession())
                 .setSystemProperty(JOIN_REORDERING_STRATEGY, JoinReorderingStrategy.NONE.name())
-                .setSystemProperty(JOIN_DISTRIBUTION_TYPE, JoinNode.DistributionType.PARTITIONED.name())
+                .setSystemProperty(JOIN_DISTRIBUTION_TYPE, JoinDistributionType.PARTITIONED.name())
                 .build();
     }
 }

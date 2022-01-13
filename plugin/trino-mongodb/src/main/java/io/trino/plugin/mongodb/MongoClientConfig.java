@@ -18,19 +18,22 @@ import com.google.common.collect.ImmutableList;
 import com.mongodb.MongoCredential;
 import com.mongodb.ServerAddress;
 import io.airlift.configuration.Config;
+import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.DefunctConfig;
 
+import javax.validation.constraints.AssertTrue;
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
-import javax.validation.constraints.Size;
+import javax.validation.constraints.Pattern;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.mongodb.MongoCredential.createCredential;
 
-@DefunctConfig("mongodb.connection-per-host")
+@DefunctConfig({"mongodb.connection-per-host", "mongodb.socket-keep-alive"})
 public class MongoClientConfig
 {
     private static final Splitter SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
@@ -38,6 +41,7 @@ public class MongoClientConfig
 
     private String schemaCollection = "_schema";
     private boolean caseInsensitiveNameMatching;
+    private Optional<String> connectionUrl = Optional.empty();
     private List<ServerAddress> seeds = ImmutableList.of();
     private List<MongoCredential> credentials = ImmutableList.of();
 
@@ -47,7 +51,6 @@ public class MongoClientConfig
     private int connectionTimeout = 10_000;
     private int socketTimeout;
     private int maxConnectionIdleTime;
-    private boolean socketKeepAlive;
     private boolean sslEnabled;
 
     // query configurations
@@ -57,6 +60,16 @@ public class MongoClientConfig
     private WriteConcernType writeConcern = WriteConcernType.ACKNOWLEDGED;
     private String requiredReplicaSetName;
     private String implicitRowFieldPrefix = "_pos";
+
+    @AssertTrue(message = "Exactly one of these 'mongodb.seed' or 'mongodb.connection-url' must be specified")
+    public boolean isConnectionPropertyValid()
+    {
+        if (seeds.isEmpty() && connectionUrl.isEmpty()) {
+            return false;
+        }
+
+        return seeds.isEmpty() || connectionUrl.isEmpty();
+    }
 
     @NotNull
     public String getSchemaCollection()
@@ -84,13 +97,28 @@ public class MongoClientConfig
     }
 
     @NotNull
-    @Size(min = 1)
+    public Optional<@Pattern(message = "Invalid connection URL. Expected mongodb:// or mongodb+srv://", regexp = "^mongodb(\\+srv)?://.*") String> getConnectionUrl()
+    {
+        return connectionUrl;
+    }
+
+    @Config("mongodb.connection-url")
+    @ConfigSecuritySensitive
+    public MongoClientConfig setConnectionUrl(String connectionUrl)
+    {
+        this.connectionUrl = Optional.ofNullable(connectionUrl);
+        return this;
+    }
+
+    @NotNull
+    @Deprecated
     public List<ServerAddress> getSeeds()
     {
         return seeds;
     }
 
     @Config("mongodb.seeds")
+    @Deprecated
     public MongoClientConfig setSeeds(String commaSeparatedList)
     {
         this.seeds = buildSeeds(SPLITTER.split(commaSeparatedList));
@@ -104,21 +132,18 @@ public class MongoClientConfig
     }
 
     @NotNull
+    @Deprecated
     public List<MongoCredential> getCredentials()
     {
         return credentials;
     }
 
     @Config("mongodb.credentials")
+    @ConfigSecuritySensitive
+    @Deprecated
     public MongoClientConfig setCredentials(String credentials)
     {
         this.credentials = buildCredentials(SPLITTER.split(credentials));
-        return this;
-    }
-
-    public MongoClientConfig setCredentials(String... credentials)
-    {
-        this.credentials = buildCredentials(Arrays.asList(credentials));
         return this;
     }
 
@@ -219,18 +244,6 @@ public class MongoClientConfig
     public MongoClientConfig setSocketTimeout(int socketTimeout)
     {
         this.socketTimeout = socketTimeout;
-        return this;
-    }
-
-    public boolean getSocketKeepAlive()
-    {
-        return socketKeepAlive;
-    }
-
-    @Config("mongodb.socket-keep-alive")
-    public MongoClientConfig setSocketKeepAlive(boolean socketKeepAlive)
-    {
-        this.socketKeepAlive = socketKeepAlive;
         return this;
     }
 

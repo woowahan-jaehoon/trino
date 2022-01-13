@@ -19,6 +19,7 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.OutputStreamSliceOutput;
 import io.airlift.slice.Slice;
 import io.trino.execution.buffer.PagesSerde.PagesSerdeContext;
+import io.trino.plugin.tpch.DecimalTypeMapping;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.BlockBuilder;
@@ -39,10 +40,6 @@ import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 import org.testng.annotations.Test;
 
 import java.util.Iterator;
@@ -56,6 +53,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.execution.buffer.BenchmarkDataGenerator.createValues;
 import static io.trino.execution.buffer.PagesSerdeUtil.readPages;
 import static io.trino.execution.buffer.PagesSerdeUtil.writePages;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.plugin.tpch.TpchTables.getTablePages;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DecimalType.createDecimalType;
@@ -363,7 +361,7 @@ public class BenchmarkBlockSerde
         {
             PagesSerde pagesSerde = new PagesSerdeFactory(new TestingBlockEncodingSerde(), false).createPagesSerde();
 
-            List<Page> pages = ImmutableList.copyOf(getTablePages("lineitem", 0.1));
+            List<Page> pages = ImmutableList.copyOf(getTablePages("lineitem", 0.1, DecimalTypeMapping.DOUBLE));
             DynamicSliceOutput sliceOutput = new DynamicSliceOutput(0);
             writePages(pagesSerde, new OutputStreamSliceOutput(sliceOutput), pages.listIterator());
             setup(sliceOutput.slice(), pagesSerde, pages);
@@ -381,11 +379,6 @@ public class BenchmarkBlockSerde
     public static void main(String[] args)
             throws Exception
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkBlockSerde.class.getSimpleName() + ".*")
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkBlockSerde.class).run();
     }
 }

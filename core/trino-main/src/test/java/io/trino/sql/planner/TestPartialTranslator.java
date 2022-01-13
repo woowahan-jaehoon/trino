@@ -16,18 +16,16 @@ package io.trino.sql.planner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
-import io.trino.metadata.Metadata;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.type.Type;
-import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
-import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.Identifier;
+import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NodeRef;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.StringLiteral;
+import io.trino.sql.tree.SubscriptExpression;
 import io.trino.sql.tree.SymbolReference;
 import io.trino.transaction.TransactionId;
 import org.testng.annotations.Test;
@@ -36,7 +34,6 @@ import java.util.List;
 import java.util.Map;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -45,6 +42,8 @@ import static io.trino.spi.type.RowType.rowType;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.sql.planner.ConnectorExpressionTranslator.translate;
 import static io.trino.sql.planner.PartialTranslator.extractPartialTranslations;
+import static io.trino.sql.planner.TestingPlannerContext.PLANNER_CONTEXT;
+import static io.trino.sql.planner.TypeAnalyzer.createTestingTypeAnalyzer;
 import static io.trino.sql.tree.ArithmeticBinaryExpression.Operator.ADD;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.testng.Assert.assertEquals;
@@ -54,8 +53,7 @@ public class TestPartialTranslator
     private static final Session TEST_SESSION = testSessionBuilder()
             .setTransactionId(TransactionId.create())
             .build();
-    private static final Metadata METADATA = createTestMetadataManager();
-    private static final TypeAnalyzer TYPE_ANALYZER = new TypeAnalyzer(new SqlParser(), METADATA);
+    private static final TypeAnalyzer TYPE_ANALYZER = createTestingTypeAnalyzer(PLANNER_CONTEXT);
     private static final TypeProvider TYPE_PROVIDER = TypeProvider.copyOf(ImmutableMap.<Symbol, Type>builder()
             .put(new Symbol("double_symbol_1"), DOUBLE)
             .put(new Symbol("double_symbol_2"), DOUBLE)
@@ -67,8 +65,8 @@ public class TestPartialTranslator
     public void testPartialTranslator()
     {
         Expression rowSymbolReference = new SymbolReference("row_symbol_1");
-        Expression dereferenceExpression1 = new DereferenceExpression(rowSymbolReference, new Identifier("int_symbol_1"));
-        Expression dereferenceExpression2 = new DereferenceExpression(rowSymbolReference, new Identifier("varchar_symbol_1"));
+        Expression dereferenceExpression1 = new SubscriptExpression(rowSymbolReference, new LongLiteral("1"));
+        Expression dereferenceExpression2 = new SubscriptExpression(rowSymbolReference, new LongLiteral("2"));
         Expression stringLiteral = new StringLiteral("abcd");
         Expression symbolReference1 = new SymbolReference("double_symbol_1");
 

@@ -47,9 +47,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static com.google.common.base.Predicates.equalTo;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCALE_FACTOR;
+import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.strictConstrainedTableScan;
@@ -75,7 +75,7 @@ public class TestPruneTableScanColumns
                             p.tableScan(
                                     new TableHandle(
                                             new CatalogName("local"),
-                                            new TpchTableHandle("orders", TINY_SCALE_FACTOR),
+                                            new TpchTableHandle(TINY_SCHEMA_NAME, "orders", TINY_SCALE_FACTOR),
                                             TpchTransactionHandle.INSTANCE,
                                             Optional.empty()),
                                     ImmutableList.of(orderdate, totalprice),
@@ -103,7 +103,7 @@ public class TestPruneTableScanColumns
                             p.tableScan(
                                     new TableHandle(
                                             new CatalogName("local"),
-                                            new TpchTableHandle("orders", TINY_SCALE_FACTOR),
+                                            new TpchTableHandle(TINY_SCHEMA_NAME, "orders", TINY_SCALE_FACTOR),
                                             TpchTransactionHandle.INSTANCE,
                                             Optional.empty()),
                                     List.of(orderdate, totalprice),
@@ -184,12 +184,12 @@ public class TestPruneTableScanColumns
                             strictProject(
                                     ImmutableMap.of("expr", PlanMatchPattern.expression("COLB")),
                                     tableScan(
-                                            equalTo(new MockConnectorTableHandle(
+                                            new MockConnectorTableHandle(
                                                     testSchemaTable,
                                                     TupleDomain.all(),
-                                                    Optional.of(ImmutableList.of(columnHandleB)))),
+                                                    Optional.of(ImmutableList.of(columnHandleB)))::equals,
                                             TupleDomain.all(),
-                                            ImmutableMap.of("COLB", equalTo(columnHandleB)))));
+                                            ImmutableMap.of("COLB", columnHandleB::equals))));
         }
     }
 
@@ -220,6 +220,7 @@ public class TestPruneTableScanColumns
                                         variable.getName(),
                                         assignments.get(variable.getName()),
                                         ((MockConnectorColumnHandle) assignments.get(variable.getName())).getType()))
-                                .collect(toImmutableList())));
+                                .collect(toImmutableList()),
+                        false));
     }
 }

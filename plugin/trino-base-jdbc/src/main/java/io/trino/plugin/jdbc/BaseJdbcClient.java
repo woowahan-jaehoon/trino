@@ -13,16 +13,13 @@
  */
 package io.trino.plugin.jdbc;
 
-import com.google.common.base.CharMatcher;
 import com.google.common.base.VerifyException;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedSet;
 import io.airlift.log.Logger;
-import io.airlift.units.Duration;
+import io.trino.plugin.jdbc.mapping.IdentifierMapping;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -35,9 +32,9 @@ import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.CharType;
-import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 
@@ -55,60 +52,35 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.emptyToNull;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
+import static io.trino.plugin.jdbc.JdbcWriteSessionProperties.isNonTransactionalInsert;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
-import static io.trino.plugin.jdbc.StandardColumnMappings.bigintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.booleanWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.charWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.dateWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.legacyDefaultColumnMapping;
-import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.realWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.smallintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharReadFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
 import static io.trino.plugin.jdbc.TypeHandlingJdbcSessionProperties.getUnsupportedTypeHandling;
-import static io.trino.plugin.jdbc.UnsupportedTypeHandling.CONVERT_TO_VARCHAR;
 import static io.trino.plugin.jdbc.UnsupportedTypeHandling.IGNORE;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
-import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.spi.type.DateType.DATE;
-import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.spi.type.IntegerType.INTEGER;
-import static io.trino.spi.type.RealType.REAL;
-import static io.trino.spi.type.SmallintType.SMALLINT;
-import static io.trino.spi.type.TinyintType.TINYINT;
-import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static java.lang.String.CASE_INSENSITIVE_ORDER;
 import static java.lang.String.format;
 import static java.lang.String.join;
 import static java.sql.DatabaseMetaData.columnNoNulls;
 import static java.util.Collections.emptyMap;
-import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.stream.Collectors.joining;
 
 public abstract class BaseJdbcClient
@@ -116,58 +88,41 @@ public abstract class BaseJdbcClient
 {
     private static final Logger log = Logger.get(BaseJdbcClient.class);
 
-    /**
-     * @deprecated To be removed after {{@link #legacyToWriteMapping} is removed.
-     */
-    @Deprecated
-    private static final Map<Type, WriteMapping> WRITE_MAPPINGS = ImmutableMap.<Type, WriteMapping>builder()
-            .put(BOOLEAN, WriteMapping.booleanMapping("boolean", booleanWriteFunction()))
-            .put(BIGINT, WriteMapping.longMapping("bigint", bigintWriteFunction()))
-            .put(INTEGER, WriteMapping.longMapping("integer", integerWriteFunction()))
-            .put(SMALLINT, WriteMapping.longMapping("smallint", smallintWriteFunction()))
-            .put(TINYINT, WriteMapping.longMapping("tinyint", tinyintWriteFunction()))
-            .put(DOUBLE, WriteMapping.doubleMapping("double precision", doubleWriteFunction()))
-            .put(REAL, WriteMapping.longMapping("real", realWriteFunction()))
-            .put(VARBINARY, WriteMapping.sliceMapping("varbinary", varbinaryWriteFunction()))
-            .put(DATE, WriteMapping.longMapping("date", dateWriteFunction()))
-            .build();
-
     protected final ConnectionFactory connectionFactory;
     protected final String identifierQuote;
     protected final Set<String> jdbcTypesMappedToVarchar;
-    protected final boolean caseInsensitiveNameMatching;
-    protected final Cache<JdbcIdentity, Map<String, String>> remoteSchemaNames;
-    protected final Cache<RemoteTableNameCacheKey, Map<String, String>> remoteTableNames;
+    private final IdentifierMapping identifierMapping;
 
-    public BaseJdbcClient(BaseJdbcConfig config, String identifierQuote, ConnectionFactory connectionFactory)
+    public BaseJdbcClient(
+            BaseJdbcConfig config,
+            String identifierQuote,
+            ConnectionFactory connectionFactory,
+            IdentifierMapping identifierMapping)
     {
         this(
                 identifierQuote,
                 connectionFactory,
                 config.getJdbcTypesMappedToVarchar(),
-                requireNonNull(config, "config is null").isCaseInsensitiveNameMatching(),
-                config.getCaseInsensitiveNameMatchingCacheTtl());
+                identifierMapping);
     }
 
     public BaseJdbcClient(
             String identifierQuote,
             ConnectionFactory connectionFactory,
             Set<String> jdbcTypesMappedToVarchar,
-            boolean caseInsensitiveNameMatching,
-            Duration caseInsensitiveNameMatchingCacheTtl)
+            IdentifierMapping identifierMapping)
     {
         this.identifierQuote = requireNonNull(identifierQuote, "identifierQuote is null");
         this.connectionFactory = requireNonNull(connectionFactory, "connectionFactory is null");
         this.jdbcTypesMappedToVarchar = ImmutableSortedSet.orderedBy(CASE_INSENSITIVE_ORDER)
                 .addAll(requireNonNull(jdbcTypesMappedToVarchar, "jdbcTypesMappedToVarchar is null"))
                 .build();
-        requireNonNull(caseInsensitiveNameMatchingCacheTtl, "caseInsensitiveNameMatchingCacheTtl is null");
+        this.identifierMapping = requireNonNull(identifierMapping, "identifierMapping is null");
+    }
 
-        this.caseInsensitiveNameMatching = caseInsensitiveNameMatching;
-        CacheBuilder<Object, Object> remoteNamesCacheBuilder = CacheBuilder.newBuilder()
-                .expireAfterWrite(caseInsensitiveNameMatchingCacheTtl.toMillis(), MILLISECONDS);
-        this.remoteSchemaNames = remoteNamesCacheBuilder.build();
-        this.remoteTableNames = remoteNamesCacheBuilder.build();
+    protected IdentifierMapping getIdentifierMapping()
+    {
+        return identifierMapping;
     }
 
     @Override
@@ -175,7 +130,7 @@ public abstract class BaseJdbcClient
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
             return listSchemas(connection).stream()
-                    .map(schemaName -> schemaName.toLowerCase(ENGLISH))
+                    .map(remoteSchemaName -> identifierMapping.fromRemoteSchemaName(remoteSchemaName))
                     .collect(toImmutableSet());
         }
         catch (SQLException e) {
@@ -183,7 +138,7 @@ public abstract class BaseJdbcClient
         }
     }
 
-    protected Collection<String> listSchemas(Connection connection)
+    public Collection<String> listSchemas(Connection connection)
     {
         try (ResultSet resultSet = connection.getMetaData().getSchemas(connection.getCatalog(), null)) {
             ImmutableSet.Builder<String> schemaNames = ImmutableSet.builder();
@@ -210,8 +165,8 @@ public abstract class BaseJdbcClient
     public List<SchemaTableName> getTableNames(ConnectorSession session, Optional<String> schema)
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
-            JdbcIdentity identity = JdbcIdentity.from(session);
-            Optional<String> remoteSchema = schema.map(schemaName -> toRemoteSchemaName(identity, connection, schemaName));
+            ConnectorIdentity identity = session.getIdentity();
+            Optional<String> remoteSchema = schema.map(schemaName -> identifierMapping.toRemoteSchemaName(identity, connection, schemaName));
             if (remoteSchema.isPresent() && !filterSchema(remoteSchema.get())) {
                 return ImmutableList.of();
             }
@@ -219,8 +174,9 @@ public abstract class BaseJdbcClient
             try (ResultSet resultSet = getTables(connection, remoteSchema, Optional.empty())) {
                 ImmutableList.Builder<SchemaTableName> list = ImmutableList.builder();
                 while (resultSet.next()) {
-                    String tableSchema = getTableSchemaName(resultSet);
-                    String tableName = resultSet.getString("TABLE_NAME");
+                    String remoteSchemaFromResultSet = getTableSchemaName(resultSet);
+                    String tableSchema = identifierMapping.fromRemoteSchemaName(remoteSchemaFromResultSet);
+                    String tableName = identifierMapping.fromRemoteTableName(remoteSchemaFromResultSet, resultSet.getString("TABLE_NAME"));
                     if (filterSchema(tableSchema)) {
                         list.add(new SchemaTableName(tableSchema, tableName));
                     }
@@ -237,9 +193,9 @@ public abstract class BaseJdbcClient
     public Optional<JdbcTableHandle> getTableHandle(ConnectorSession session, SchemaTableName schemaTableName)
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
-            JdbcIdentity identity = JdbcIdentity.from(session);
-            String remoteSchema = toRemoteSchemaName(identity, connection, schemaTableName.getSchemaName());
-            String remoteTable = toRemoteTableName(identity, connection, remoteSchema, schemaTableName.getTableName());
+            ConnectorIdentity identity = session.getIdentity();
+            String remoteSchema = identifierMapping.toRemoteSchemaName(identity, connection, schemaTableName.getSchemaName());
+            String remoteTable = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, schemaTableName.getTableName());
             try (ResultSet resultSet = getTables(connection, Optional.of(remoteSchema), Optional.of(remoteTable))) {
                 List<JdbcTableHandle> tableHandles = new ArrayList<>();
                 while (resultSet.next()) {
@@ -289,19 +245,17 @@ public abstract class BaseJdbcClient
                         Optional.empty());
                 Optional<ColumnMapping> columnMapping = toColumnMapping(session, connection, typeHandle);
                 log.debug("Mapping data type of '%s' column '%s': %s mapped to %s", schemaTableName, columnName, typeHandle, columnMapping);
-                // skip unsupported column types
                 boolean nullable = (resultSet.getInt("NULLABLE") != columnNoNulls);
                 // Note: some databases (e.g. SQL Server) do not return column remarks/comment here.
                 Optional<String> comment = Optional.ofNullable(emptyToNull(resultSet.getString("REMARKS")));
-                if (columnMapping.isPresent()) {
-                    columns.add(JdbcColumnHandle.builder()
-                            .setColumnName(columnName)
-                            .setJdbcTypeHandle(typeHandle)
-                            .setColumnType(columnMapping.get().getType())
-                            .setNullable(nullable)
-                            .setComment(comment)
-                            .build());
-                }
+                // skip unsupported column types
+                columnMapping.ifPresent(mapping -> columns.add(JdbcColumnHandle.builder()
+                        .setColumnName(columnName)
+                        .setJdbcTypeHandle(typeHandle)
+                        .setColumnType(mapping.getType())
+                        .setNullable(nullable)
+                        .setComment(comment)
+                        .build()));
                 if (columnMapping.isEmpty()) {
                     UnsupportedTypeHandling unsupportedTypeHandling = getUnsupportedTypeHandling(session);
                     verify(
@@ -343,26 +297,6 @@ public abstract class BaseJdbcClient
                 escapeNamePattern(remoteTableName.getSchemaName(), metadata.getSearchStringEscape()).orElse(null),
                 escapeNamePattern(Optional.of(remoteTableName.getTableName()), metadata.getSearchStringEscape()).orElse(null),
                 null);
-    }
-
-    /**
-     * @deprecated Each connector should provide its own explicit type mapping, along with respective tests.
-     */
-    @Deprecated
-    protected Optional<ColumnMapping> legacyToPrestoType(ConnectorSession session, @SuppressWarnings("unused") Connection connection, JdbcTypeHandle typeHandle)
-    {
-        Optional<ColumnMapping> mapping = getForcedMappingToVarchar(typeHandle);
-        if (mapping.isPresent()) {
-            return mapping;
-        }
-        Optional<ColumnMapping> connectorMapping = legacyDefaultColumnMapping(typeHandle);
-        if (connectorMapping.isPresent()) {
-            return connectorMapping;
-        }
-        if (getUnsupportedTypeHandling(session) == CONVERT_TO_VARCHAR) {
-            return mapToUnboundedVarchar(typeHandle);
-        }
-        return Optional.empty();
     }
 
     @Override
@@ -537,39 +471,33 @@ public abstract class BaseJdbcClient
         }
     }
 
-    protected JdbcOutputTableHandle createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, String tableName)
+    protected JdbcOutputTableHandle createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, String targetTableName)
             throws SQLException
     {
         SchemaTableName schemaTableName = tableMetadata.getTable();
 
-        JdbcIdentity identity = JdbcIdentity.from(session);
+        ConnectorIdentity identity = session.getIdentity();
         if (!getSchemaNames(session).contains(schemaTableName.getSchemaName())) {
             throw new TrinoException(NOT_FOUND, "Schema not found: " + schemaTableName.getSchemaName());
         }
 
         try (Connection connection = connectionFactory.openConnection(session)) {
-            boolean uppercase = connection.getMetaData().storesUpperCaseIdentifiers();
-            String remoteSchema = toRemoteSchemaName(identity, connection, schemaTableName.getSchemaName());
-            String remoteTable = toRemoteTableName(identity, connection, remoteSchema, schemaTableName.getTableName());
-            if (uppercase) {
-                tableName = tableName.toUpperCase(ENGLISH);
-            }
+            String remoteSchema = identifierMapping.toRemoteSchemaName(identity, connection, schemaTableName.getSchemaName());
+            String remoteTable = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, schemaTableName.getTableName());
+            String remoteTargetTableName = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, targetTableName);
             String catalog = connection.getCatalog();
 
             ImmutableList.Builder<String> columnNames = ImmutableList.builder();
             ImmutableList.Builder<Type> columnTypes = ImmutableList.builder();
             ImmutableList.Builder<String> columnList = ImmutableList.builder();
             for (ColumnMetadata column : tableMetadata.getColumns()) {
-                String columnName = column.getName();
-                if (uppercase) {
-                    columnName = columnName.toUpperCase(ENGLISH);
-                }
+                String columnName = identifierMapping.toRemoteColumnName(connection, column.getName());
                 columnNames.add(columnName);
                 columnTypes.add(column.getType());
                 columnList.add(getColumnDefinitionSql(session, column, columnName));
             }
 
-            RemoteTableName remoteTableName = new RemoteTableName(Optional.ofNullable(catalog), Optional.ofNullable(remoteSchema), tableName);
+            RemoteTableName remoteTableName = new RemoteTableName(Optional.ofNullable(catalog), Optional.ofNullable(remoteSchema), remoteTargetTableName);
             String sql = createTableSql(remoteTableName, columnList.build(), tableMetadata);
             execute(connection, sql);
 
@@ -580,7 +508,7 @@ public abstract class BaseJdbcClient
                     columnNames.build(),
                     columnTypes.build(),
                     Optional.empty(),
-                    tableName);
+                    remoteTargetTableName);
         }
     }
 
@@ -606,16 +534,11 @@ public abstract class BaseJdbcClient
     public JdbcOutputTableHandle beginInsertTable(ConnectorSession session, JdbcTableHandle tableHandle, List<JdbcColumnHandle> columns)
     {
         SchemaTableName schemaTableName = tableHandle.asPlainTable().getSchemaTableName();
-        JdbcIdentity identity = JdbcIdentity.from(session);
+        ConnectorIdentity identity = session.getIdentity();
 
         try (Connection connection = connectionFactory.openConnection(session)) {
-            boolean uppercase = connection.getMetaData().storesUpperCaseIdentifiers();
-            String remoteSchema = toRemoteSchemaName(identity, connection, schemaTableName.getSchemaName());
-            String remoteTable = toRemoteTableName(identity, connection, remoteSchema, schemaTableName.getTableName());
-            String tableName = generateTemporaryTableName();
-            if (uppercase) {
-                tableName = tableName.toUpperCase(ENGLISH);
-            }
+            String remoteSchema = identifierMapping.toRemoteSchemaName(identity, connection, schemaTableName.getSchemaName());
+            String remoteTable = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, schemaTableName.getTableName());
             String catalog = connection.getCatalog();
 
             ImmutableList.Builder<String> columnNames = ImmutableList.builder();
@@ -627,7 +550,19 @@ public abstract class BaseJdbcClient
                 jdbcColumnTypes.add(column.getJdbcTypeHandle());
             }
 
-            copyTableSchema(connection, catalog, remoteSchema, remoteTable, tableName, columnNames.build());
+            if (isNonTransactionalInsert(session)) {
+                return new JdbcOutputTableHandle(
+                        catalog,
+                        remoteSchema,
+                        remoteTable,
+                        columnNames.build(),
+                        columnTypes.build(),
+                        Optional.of(jdbcColumnTypes.build()),
+                        remoteTable);
+            }
+
+            String remoteTemporaryTableName = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, generateTemporaryTableName());
+            copyTableSchema(connection, catalog, remoteSchema, remoteTable, remoteTemporaryTableName, columnNames.build());
 
             return new JdbcOutputTableHandle(
                     catalog,
@@ -636,7 +571,7 @@ public abstract class BaseJdbcClient
                     columnNames.build(),
                     columnTypes.build(),
                     Optional.of(jdbcColumnTypes.build()),
-                    tableName);
+                    remoteTemporaryTableName);
         }
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
@@ -677,19 +612,18 @@ public abstract class BaseJdbcClient
         renameTable(session, handle.getCatalogName(), handle.getSchemaName(), handle.getTableName(), newTableName);
     }
 
-    protected void renameTable(ConnectorSession session, String catalogName, String schemaName, String tableName, SchemaTableName newTable)
+    protected void renameTable(ConnectorSession session, String catalogName, String remoteSchemaName, String remoteTableName, SchemaTableName newTable)
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
             String newSchemaName = newTable.getSchemaName();
             String newTableName = newTable.getTableName();
-            if (connection.getMetaData().storesUpperCaseIdentifiers()) {
-                newSchemaName = newSchemaName.toUpperCase(ENGLISH);
-                newTableName = newTableName.toUpperCase(ENGLISH);
-            }
+            ConnectorIdentity identity = session.getIdentity();
+            String newRemoteSchemaName = identifierMapping.toRemoteSchemaName(identity, connection, newSchemaName);
+            String newRemoteTableName = identifierMapping.toRemoteTableName(identity, connection, newRemoteSchemaName, newTableName);
             String sql = format(
                     "ALTER TABLE %s RENAME TO %s",
-                    quoted(catalogName, schemaName, tableName),
-                    quoted(catalogName, newSchemaName, newTableName));
+                    quoted(catalogName, remoteSchemaName, remoteTableName),
+                    quoted(catalogName, newRemoteSchemaName, newRemoteTableName));
             execute(connection, sql);
         }
         catch (SQLException e) {
@@ -700,13 +634,20 @@ public abstract class BaseJdbcClient
     @Override
     public void finishInsertTable(ConnectorSession session, JdbcOutputTableHandle handle)
     {
-        String temporaryTable = quoted(handle.getCatalogName(), handle.getSchemaName(), handle.getTemporaryTableName());
-        String targetTable = quoted(handle.getCatalogName(), handle.getSchemaName(), handle.getTableName());
-        String columnNames = handle.getColumnNames().stream()
-                .map(this::quoted)
-                .collect(joining(", "));
-        String insertSql = format("INSERT INTO %s (%s) SELECT %s FROM %s", targetTable, columnNames, columnNames, temporaryTable);
-        String cleanupSql = "DROP TABLE " + temporaryTable;
+        if (isNonTransactionalInsert(session)) {
+            checkState(handle.getTemporaryTableName().equals(handle.getTableName()), "Unexpected use of temporary table when non transactional inserts are enabled");
+            return;
+        }
+
+        RemoteTableName temporaryTable = new RemoteTableName(
+                Optional.ofNullable(handle.getCatalogName()),
+                Optional.ofNullable(handle.getSchemaName()),
+                handle.getTemporaryTableName());
+        RemoteTableName targetTable = new RemoteTableName(
+                Optional.ofNullable(handle.getCatalogName()),
+                Optional.ofNullable(handle.getSchemaName()),
+                handle.getTableName());
+        String insertSql = buildInsertSql(session, targetTable, temporaryTable, handle.getColumnNames());
 
         try (Connection connection = getConnection(session, handle)) {
             execute(connection, insertSql);
@@ -714,13 +655,17 @@ public abstract class BaseJdbcClient
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
         }
+        finally {
+            dropTable(session, temporaryTable);
+        }
+    }
 
-        try (Connection connection = getConnection(session, handle)) {
-            execute(connection, cleanupSql);
-        }
-        catch (SQLException e) {
-            log.warn(e, "Failed to cleanup temporary table: %s", temporaryTable);
-        }
+    protected String buildInsertSql(ConnectorSession session, RemoteTableName targetTable, RemoteTableName sourceTable, List<String> columnNames)
+    {
+        String columns = columnNames.stream()
+                .map(this::quoted)
+                .collect(joining(", "));
+        return format("INSERT INTO %s (%s) SELECT %s FROM %s", quoted(targetTable), columns, columns, quoted(sourceTable));
     }
 
     @Override
@@ -728,13 +673,11 @@ public abstract class BaseJdbcClient
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
             String columnName = column.getName();
-            if (connection.getMetaData().storesUpperCaseIdentifiers()) {
-                columnName = columnName.toUpperCase(ENGLISH);
-            }
+            String remoteColumnName = identifierMapping.toRemoteColumnName(connection, columnName);
             String sql = format(
                     "ALTER TABLE %s ADD %s",
                     quoted(handle.asPlainTable().getRemoteTableName()),
-                    getColumnDefinitionSql(session, column, columnName));
+                    getColumnDefinitionSql(session, column, remoteColumnName));
             execute(connection, sql);
         }
         catch (SQLException e) {
@@ -746,14 +689,12 @@ public abstract class BaseJdbcClient
     public void renameColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle jdbcColumn, String newColumnName)
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
-            if (connection.getMetaData().storesUpperCaseIdentifiers()) {
-                newColumnName = newColumnName.toUpperCase(ENGLISH);
-            }
+            String newRemoteColumnName = identifierMapping.toRemoteColumnName(connection, newColumnName);
             String sql = format(
                     "ALTER TABLE %s RENAME COLUMN %s TO %s",
                     quoted(handle.asPlainTable().getRemoteTableName()),
                     jdbcColumn.getColumnName(),
-                    newColumnName);
+                    newRemoteColumnName);
             execute(connection, sql);
         }
         catch (SQLException e) {
@@ -774,7 +715,12 @@ public abstract class BaseJdbcClient
     @Override
     public void dropTable(ConnectorSession session, JdbcTableHandle handle)
     {
-        String sql = "DROP TABLE " + quoted(handle.asPlainTable().getRemoteTableName());
+        dropTable(session, handle.asPlainTable().getRemoteTableName());
+    }
+
+    private void dropTable(ConnectorSession session, RemoteTableName remoteTableName)
+    {
+        String sql = "DROP TABLE " + quoted(remoteTableName);
         execute(session, sql);
     }
 
@@ -817,14 +763,15 @@ public abstract class BaseJdbcClient
         return connection.prepareStatement(sql);
     }
 
-    protected ResultSet getTables(Connection connection, Optional<String> schemaName, Optional<String> tableName)
+    public ResultSet getTables(Connection connection, Optional<String> remoteSchemaName, Optional<String> remoteTableName)
             throws SQLException
     {
+        // this method is called by IdentifierMapping, so cannot use IdentifierMapping here as this woudl cause an endless loop
         DatabaseMetaData metadata = connection.getMetaData();
         return metadata.getTables(
                 connection.getCatalog(),
-                escapeNamePattern(schemaName, metadata.getSearchStringEscape()).orElse(null),
-                escapeNamePattern(tableName, metadata.getSearchStringEscape()).orElse(null),
+                escapeNamePattern(remoteSchemaName, metadata.getSearchStringEscape()).orElse(null),
+                escapeNamePattern(remoteTableName, metadata.getSearchStringEscape()).orElse(null),
                 getTableTypes().map(types -> types.toArray(String[]::new)).orElse(null));
     }
 
@@ -839,107 +786,6 @@ public abstract class BaseJdbcClient
         return resultSet.getString("TABLE_SCHEM");
     }
 
-    protected String toRemoteSchemaName(JdbcIdentity identity, Connection connection, String schemaName)
-    {
-        requireNonNull(schemaName, "schemaName is null");
-        verify(CharMatcher.forPredicate(Character::isUpperCase).matchesNoneOf(schemaName), "Expected schema name from internal metadata to be lowercase: %s", schemaName);
-
-        if (caseInsensitiveNameMatching) {
-            try {
-                Map<String, String> mapping = remoteSchemaNames.getIfPresent(identity);
-                if (mapping != null && !mapping.containsKey(schemaName)) {
-                    // This might be a schema that has just been created. Force reload.
-                    mapping = null;
-                }
-                if (mapping == null) {
-                    mapping = listSchemasByLowerCase(connection);
-                    remoteSchemaNames.put(identity, mapping);
-                }
-                String remoteSchema = mapping.get(schemaName);
-                if (remoteSchema != null) {
-                    return remoteSchema;
-                }
-            }
-            catch (RuntimeException e) {
-                throw new TrinoException(JDBC_ERROR, "Failed to find remote schema name: " + firstNonNull(e.getMessage(), e), e);
-            }
-        }
-
-        try {
-            DatabaseMetaData metadata = connection.getMetaData();
-            if (metadata.storesUpperCaseIdentifiers()) {
-                return schemaName.toUpperCase(ENGLISH);
-            }
-            return schemaName;
-        }
-        catch (SQLException e) {
-            throw new TrinoException(JDBC_ERROR, e);
-        }
-    }
-
-    protected Map<String, String> listSchemasByLowerCase(Connection connection)
-    {
-        return listSchemas(connection).stream()
-                // will throw on collisions to avoid ambiguity
-                .collect(toImmutableMap(schemaName -> schemaName.toLowerCase(ENGLISH), schemaName -> schemaName));
-    }
-
-    protected String toRemoteTableName(JdbcIdentity identity, Connection connection, String remoteSchema, String tableName)
-    {
-        requireNonNull(remoteSchema, "remoteSchema is null");
-        requireNonNull(tableName, "tableName is null");
-        verify(CharMatcher.forPredicate(Character::isUpperCase).matchesNoneOf(tableName), "Expected table name from internal metadata to be lowercase: %s", tableName);
-
-        if (caseInsensitiveNameMatching) {
-            try {
-                RemoteTableNameCacheKey cacheKey = new RemoteTableNameCacheKey(identity, remoteSchema);
-                Map<String, String> mapping = remoteTableNames.getIfPresent(cacheKey);
-                if (mapping != null && !mapping.containsKey(tableName)) {
-                    // This might be a table that has just been created. Force reload.
-                    mapping = null;
-                }
-                if (mapping == null) {
-                    mapping = listTablesByLowerCase(connection, remoteSchema);
-                    remoteTableNames.put(cacheKey, mapping);
-                }
-                String remoteTable = mapping.get(tableName);
-                if (remoteTable != null) {
-                    return remoteTable;
-                }
-            }
-            catch (RuntimeException e) {
-                throw new TrinoException(JDBC_ERROR, "Failed to find remote table name: " + firstNonNull(e.getMessage(), e), e);
-            }
-        }
-
-        try {
-            DatabaseMetaData metadata = connection.getMetaData();
-            if (metadata.storesUpperCaseIdentifiers()) {
-                return tableName.toUpperCase(ENGLISH);
-            }
-            return tableName;
-        }
-        catch (SQLException e) {
-            throw new TrinoException(JDBC_ERROR, e);
-        }
-    }
-
-    protected Map<String, String> listTablesByLowerCase(Connection connection, String remoteSchema)
-    {
-        try (ResultSet resultSet = getTables(connection, Optional.of(remoteSchema), Optional.empty())) {
-            ImmutableMap.Builder<String, String> map = ImmutableMap.builder();
-            while (resultSet.next()) {
-                String tableName = resultSet.getString("TABLE_NAME");
-                map.put(tableName.toLowerCase(ENGLISH), tableName);
-            }
-            // will throw on collisions to avoid ambiguity
-            return map.build();
-        }
-        catch (SQLException e) {
-            throw new TrinoException(JDBC_ERROR, e);
-        }
-    }
-
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, JdbcTableHandle handle, TupleDomain<ColumnHandle> tupleDomain)
     {
@@ -949,9 +795,9 @@ public abstract class BaseJdbcClient
     @Override
     public void createSchema(ConnectorSession session, String schemaName)
     {
-        JdbcIdentity identity = JdbcIdentity.from(session);
+        ConnectorIdentity identity = session.getIdentity();
         try (Connection connection = connectionFactory.openConnection(session)) {
-            schemaName = toRemoteSchemaName(identity, connection, schemaName);
+            schemaName = identifierMapping.toRemoteSchemaName(identity, connection, schemaName);
             execute(connection, createSchemaSql(schemaName));
         }
         catch (SQLException e) {
@@ -967,9 +813,9 @@ public abstract class BaseJdbcClient
     @Override
     public void dropSchema(ConnectorSession session, String schemaName)
     {
-        JdbcIdentity identity = JdbcIdentity.from(session);
+        ConnectorIdentity identity = session.getIdentity();
         try (Connection connection = connectionFactory.openConnection(session)) {
-            schemaName = toRemoteSchemaName(identity, connection, schemaName);
+            schemaName = identifierMapping.toRemoteSchemaName(identity, connection, schemaName);
             execute(connection, dropSchemaSql(schemaName));
         }
         catch (SQLException e) {
@@ -1005,40 +851,23 @@ public abstract class BaseJdbcClient
         }
     }
 
-    /**
-     * @deprecated Each connector should provide its own explicit type mapping, along with respective tests.
-     */
-    @Deprecated
-    protected WriteMapping legacyToWriteMapping(@SuppressWarnings("unused") ConnectorSession session, Type type)
+    protected static boolean preventTextualTypeAggregationPushdown(List<List<ColumnHandle>> groupingSets)
     {
-        if (type instanceof VarcharType) {
-            VarcharType varcharType = (VarcharType) type;
-            String dataType;
-            if (varcharType.isUnbounded()) {
-                dataType = "varchar";
+        // Remote database can be case insensitive or sorts textual types differently than Trino.
+        // In such cases we should not pushdown aggregations if the grouping set contains a textual type.
+        if (!groupingSets.isEmpty()) {
+            for (List<ColumnHandle> groupingSet : groupingSets) {
+                boolean hasCaseSensitiveGroupingSet = groupingSet.stream()
+                        .map(columnHandle -> ((JdbcColumnHandle) columnHandle).getColumnType())
+                        // this may catch more cases than required (e.g. MONEY in Postgres) but doesn't affect correctness
+                        .anyMatch(type -> type instanceof VarcharType || type instanceof CharType);
+                if (hasCaseSensitiveGroupingSet) {
+                    return false;
+                }
             }
-            else {
-                dataType = "varchar(" + varcharType.getBoundedLength() + ")";
-            }
-            return WriteMapping.sliceMapping(dataType, varcharWriteFunction());
-        }
-        if (type instanceof CharType) {
-            return WriteMapping.sliceMapping("char(" + ((CharType) type).getLength() + ")", charWriteFunction());
-        }
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
-            String dataType = format("decimal(%s, %s)", decimalType.getPrecision(), decimalType.getScale());
-            if (decimalType.isShort()) {
-                return WriteMapping.longMapping(dataType, shortDecimalWriteFunction(decimalType));
-            }
-            return WriteMapping.sliceMapping(dataType, longDecimalWriteFunction(decimalType));
         }
 
-        WriteMapping writeMapping = WRITE_MAPPINGS.get(type);
-        if (writeMapping != null) {
-            return writeMapping;
-        }
-        throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type.getDisplayName());
+        return true;
     }
 
     @Override
@@ -1063,7 +892,7 @@ public abstract class BaseJdbcClient
     }
 
     @Override
-    public boolean isTopNLimitGuaranteed(ConnectorSession session)
+    public boolean isTopNGuaranteed(ConnectorSession session)
     {
         throw new UnsupportedOperationException("topNFunction() implemented without implementing isTopNLimitGuaranteed()");
     }
@@ -1112,6 +941,32 @@ public abstract class BaseJdbcClient
     public Map<String, Object> getTableProperties(ConnectorSession session, JdbcTableHandle tableHandle)
     {
         return emptyMap();
+    }
+
+    @Override
+    public OptionalLong delete(ConnectorSession session, JdbcTableHandle handle)
+    {
+        checkArgument(handle.isNamedRelation(), "Unable to delete from synthetic table: %s", handle);
+        checkArgument(handle.getLimit().isEmpty(), "Unable to delete when limit is set: %s", handle);
+        checkArgument(handle.getSortOrder().isEmpty(), "Unable to delete when sort order is set: %s", handle);
+        try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
+            QueryBuilder queryBuilder = new QueryBuilder(this);
+            PreparedQuery preparedQuery = queryBuilder.prepareDelete(session, connection, handle.getRequiredNamedRelation(), handle.getConstraint());
+            try (PreparedStatement preparedStatement = queryBuilder.prepareStatement(session, connection, preparedQuery)) {
+                return OptionalLong.of(preparedStatement.executeUpdate());
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
+        }
+    }
+
+    @Override
+    public void truncateTable(ConnectorSession session, JdbcTableHandle handle)
+    {
+        String sql = "TRUNCATE TABLE " + quoted(handle.asPlainTable().getRemoteTableName());
+        execute(session, sql);
     }
 
     protected String quoted(@Nullable String catalog, @Nullable String schema, String table)

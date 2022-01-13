@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
 import io.trino.plugin.hive.HdfsEnvironment;
-import io.trino.plugin.hive.HiveMetadata;
 import io.trino.plugin.hive.PartitionStatistics;
 import io.trino.plugin.hive.TransactionalMetadataFactory;
 import io.trino.plugin.hive.authentication.HiveIdentity;
@@ -44,6 +43,7 @@ import java.io.IOException;
 import java.lang.invoke.MethodHandle;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -116,7 +116,7 @@ public class SyncPartitionMetadataProcedure
         SyncMode syncMode = toSyncMode(mode);
         HdfsContext hdfsContext = new HdfsContext(session);
         HiveIdentity identity = new HiveIdentity(session);
-        SemiTransactionalHiveMetastore metastore = ((HiveMetadata) hiveMetadataFactory.create()).getMetastore();
+        SemiTransactionalHiveMetastore metastore = hiveMetadataFactory.create(true).getMetastore();
         SchemaTableName schemaTableName = new SchemaTableName(schemaName, tableName);
 
         Table table = metastore.getTable(identity, schemaName, tableName)
@@ -221,7 +221,9 @@ public class SyncPartitionMetadataProcedure
                     table.getTableName(),
                     buildPartitionObject(session, table, name),
                     new Path(table.getStorage().getLocation(), name),
-                    PartitionStatistics.empty());
+                    Optional.empty(), // no need for failed attempts cleanup
+                    PartitionStatistics.empty(),
+                    false);
         }
     }
 

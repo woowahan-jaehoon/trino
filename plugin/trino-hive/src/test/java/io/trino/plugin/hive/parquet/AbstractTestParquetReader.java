@@ -29,7 +29,6 @@ import io.trino.spi.type.SqlDecimal;
 import io.trino.spi.type.SqlTimestamp;
 import io.trino.spi.type.SqlVarbinary;
 import io.trino.spi.type.Type;
-import io.trino.testng.services.Flaky;
 import org.apache.hadoop.hive.common.type.Date;
 import org.apache.hadoop.hive.common.type.HiveDecimal;
 import org.apache.hadoop.hive.common.type.Timestamp;
@@ -66,7 +65,6 @@ import static com.google.common.collect.Iterables.cycle;
 import static com.google.common.collect.Iterables.limit;
 import static com.google.common.collect.Iterables.transform;
 import static io.trino.plugin.hive.parquet.ParquetTester.insertNullEvery;
-import static io.trino.plugin.hive.parquet.ParquetTester.testMaxReadBytes;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
@@ -240,7 +238,6 @@ public abstract class AbstractTestParquetReader
     }
 
     @Test
-    @Flaky(issue = "https://github.com/trinodb/trino/issues/4984", match = ".*maxCapacityHint can't be less than initialSlabSize.*") // TODO
     public void testArrayOfArrayOfStructOfArray()
             throws Exception
     {
@@ -359,8 +356,6 @@ public abstract class AbstractTestParquetReader
     }
 
     @Test
-    @Flaky(issue = "https://github.com/trinodb/trino/issues/4984", match = ".*maxCapacityHint can't be less than initialSlabSize.*") // TODO
-    // Flaky failure comes from org.apache.hadoop.hive.ql.io.parquet.write.ParquetRecordWriterWrapper used during test initialization
     public void testArrayOfMapOfStruct()
             throws Exception
     {
@@ -542,7 +537,6 @@ public abstract class AbstractTestParquetReader
     }
 
     @Test
-    @Flaky(issue = "https://github.com/trinodb/trino/issues/4063", match = "struct field values cannot be empty")
     public void testComplexNestedStructs()
             throws Exception
     {
@@ -891,10 +885,13 @@ public abstract class AbstractTestParquetReader
     {
         for (int precision = 1; precision < MAX_PRECISION; precision++) {
             int scale = ThreadLocalRandom.current().nextInt(precision);
-            ContiguousSet<BigInteger> values = bigIntegersBetween(BigDecimal.valueOf(Math.pow(10, precision - 1)).negate().toBigInteger(), BigDecimal.valueOf(Math.pow(10, precision)).toBigInteger());
             ImmutableList.Builder<SqlDecimal> expectedValues = new ImmutableList.Builder<>();
             ImmutableList.Builder<HiveDecimal> writeValues = new ImmutableList.Builder<>();
-            for (BigInteger value : limit(values, 1_000)) {
+
+            BigInteger start = BigDecimal.valueOf(Math.pow(10, precision - 1)).negate().toBigInteger();
+            BigInteger end = BigDecimal.valueOf(Math.pow(10, precision)).toBigInteger();
+            BigInteger step = BigInteger.valueOf(1).max(end.subtract(start).divide(BigInteger.valueOf(1_000)));
+            for (BigInteger value = start; value.compareTo(end) < 0; value = value.add(step)) {
                 writeValues.add(HiveDecimal.create(value, scale));
                 expectedValues.add(new SqlDecimal(value, precision, scale));
             }
@@ -1489,8 +1486,6 @@ public abstract class AbstractTestParquetReader
     }
 
     @Test
-    @Flaky(issue = "https://github.com/trinodb/trino/issues/6193", match = ".*maxCapacityHint can't be less than initialSlabSize.*")
-    // Flaky failure comes from org.apache.hadoop.hive.ql.io.parquet.write.ParquetRecordWriterWrapper used during test initialization
     public void testDoubleNaNInfinity()
             throws Exception
     {
@@ -1605,7 +1600,7 @@ public abstract class AbstractTestParquetReader
         List<String> structFieldNames = asList("a", "b");
         Type structType = RowType.from(asList(field("a", VARCHAR), field("b", VARCHAR)));
 
-        testMaxReadBytes(
+        tester.testMaxReadBytes(
                 getStandardStructObjectInspector(structFieldNames, asList(javaStringObjectInspector, javaStringObjectInspector)),
                 structValues,
                 structValues,
@@ -1619,7 +1614,7 @@ public abstract class AbstractTestParquetReader
     {
         DataSize maxReadBlockSize = DataSize.ofBytes(1_000);
         Iterable<List<Integer>> values = createFixedTestArrays(limit(cycle(asList(1, null, 3, 5, null, null, null, 7, 11, null, 13, 17)), 30_000));
-        testMaxReadBytes(getStandardListObjectInspector(javaIntObjectInspector), values, values, new ArrayType(INTEGER), maxReadBlockSize);
+        tester.testMaxReadBytes(getStandardListObjectInspector(javaIntObjectInspector), values, values, new ArrayType(INTEGER), maxReadBlockSize);
     }
 
     @Test
@@ -1628,7 +1623,7 @@ public abstract class AbstractTestParquetReader
     {
         DataSize maxReadBlockSize = DataSize.ofBytes(1_000);
         Iterable<Map<String, Long>> values = createFixedTestMaps(Collections.nCopies(5_000, join("", Collections.nCopies(33, "test"))), longsBetween(0, 5_000));
-        testMaxReadBytes(getStandardMapObjectInspector(javaStringObjectInspector, javaLongObjectInspector), values, values, mapType(VARCHAR, BIGINT), maxReadBlockSize);
+        tester.testMaxReadBytes(getStandardMapObjectInspector(javaStringObjectInspector, javaLongObjectInspector), values, values, mapType(VARCHAR, BIGINT), maxReadBlockSize);
     }
 
     private static <T> Iterable<T> repeatEach(int n, Iterable<T> iterable)
@@ -1694,11 +1689,6 @@ public abstract class AbstractTestParquetReader
     private static ContiguousSet<Long> longsBetween(long lowerInclusive, long upperExclusive)
     {
         return ContiguousSet.create(Range.closedOpen(lowerInclusive, upperExclusive), DiscreteDomain.longs());
-    }
-
-    private static ContiguousSet<BigInteger> bigIntegersBetween(BigInteger lowerInclusive, BigInteger upperExclusive)
-    {
-        return ContiguousSet.create(Range.closedOpen(lowerInclusive, upperExclusive), DiscreteDomain.bigIntegers());
     }
 
     private <F> List<List<?>> createTestStructs(Iterable<F> fieldValues)

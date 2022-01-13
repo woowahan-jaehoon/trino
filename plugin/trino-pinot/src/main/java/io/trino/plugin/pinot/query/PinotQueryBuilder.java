@@ -22,15 +22,23 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.RealType;
+import io.trino.spi.type.Type;
+import io.trino.spi.type.VarbinaryType;
+import io.trino.spi.type.VarcharType;
+import org.apache.commons.codec.binary.Hex;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static java.lang.Float.intBitsToFloat;
+import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
@@ -45,19 +53,19 @@ public final class PinotQueryBuilder
     {
         requireNonNull(tableHandle, "tableHandle is null");
         StringBuilder pqlBuilder = new StringBuilder();
-        List<String> columnNames;
+        List<String> quotedColumnNames;
         if (columnHandles.isEmpty()) {
             // This occurs when the query is SELECT COUNT(*) FROM pinotTable ...
-            columnNames = ImmutableList.of("*");
+            quotedColumnNames = ImmutableList.of("*");
         }
         else {
-            columnNames = columnHandles.stream()
-                    .map(PinotColumnHandle::getColumnName)
+            quotedColumnNames = columnHandles.stream()
+                    .map(column -> quoteIdentifier(column.getColumnName()))
                     .collect(toImmutableList());
         }
 
         pqlBuilder.append("SELECT ");
-        pqlBuilder.append(String.join(", ", columnNames))
+        pqlBuilder.append(String.join(", ", quotedColumnNames))
                 .append(" FROM ")
                 .append(getTableName(tableHandle, tableNameSuffix))
                 .append(" ");
@@ -96,11 +104,9 @@ public final class PinotQueryBuilder
         ImmutableList.Builder<String> conjunctsBuilder = ImmutableList.builder();
         timePredicate.ifPresent(conjunctsBuilder::add);
         if (!tupleDomain.equals(TupleDomain.all())) {
-            for (PinotColumnHandle columnHandle : columnHandles) {
-                Domain domain = tupleDomain.getDomains().get().get(columnHandle);
-                if (domain != null) {
-                    conjunctsBuilder.add(toPredicate(columnHandle.getColumnName(), domain));
-                }
+            Map<ColumnHandle, Domain> domains = tupleDomain.getDomains().orElseThrow();
+            for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
+                conjunctsBuilder.add(toPredicate(((PinotColumnHandle) entry.getKey()).getColumnName(), entry.getValue()));
             }
         }
         List<String> conjuncts = conjunctsBuilder.build();
@@ -119,29 +125,43 @@ public final class PinotQueryBuilder
         for (Range range : domain.getValues().getRanges().getOrderedRanges()) {
             checkState(!range.isAll()); // Already checked
             if (range.isSingleValue()) {
-                singleValues.add(range.getSingleValue());
+                singleValues.add(convertValue(range.getType(), range.getSingleValue()));
             }
             else {
                 List<String> rangeConjuncts = new ArrayList<>();
                 if (!range.isLowUnbounded()) {
-                    rangeConjuncts.add(toConjunct(columnName, range.isLowInclusive() ? ">=" : ">", range.getLowBoundedValue()));
+                    rangeConjuncts.add(toConjunct(columnName, range.isLowInclusive() ? ">=" : ">", convertValue(range.getType(), range.getLowBoundedValue())));
                 }
                 if (!range.isHighUnbounded()) {
-                    rangeConjuncts.add(toConjunct(columnName, range.isHighInclusive() ? "<=" : "<", range.getHighBoundedValue()));
+                    rangeConjuncts.add(toConjunct(columnName, range.isHighInclusive() ? "<=" : "<", convertValue(range.getType(), range.getHighBoundedValue())));
                 }
                 // If rangeConjuncts is null, then the range was ALL, which is not supported in pql
                 checkState(!rangeConjuncts.isEmpty());
                 disjuncts.add("(" + Joiner.on(" AND ").join(rangeConjuncts) + ")");
             }
-            // Add back all of the possible single values either as an equality or an IN predicate
-            if (singleValues.size() == 1) {
-                disjuncts.add(toConjunct(columnName, "=", getOnlyElement(singleValues)));
-            }
-            else if (singleValues.size() > 1) {
-                disjuncts.add(inClauseValues(columnName, singleValues));
-            }
+        }
+        // Add back all of the possible single values either as an equality or an IN predicate
+        if (singleValues.size() == 1) {
+            disjuncts.add(toConjunct(columnName, "=", getOnlyElement(singleValues)));
+        }
+        else if (singleValues.size() > 1) {
+            disjuncts.add(inClauseValues(columnName, singleValues));
         }
         return "(" + Joiner.on(" OR ").join(disjuncts) + ")";
+    }
+
+    private static Object convertValue(Type type, Object value)
+    {
+        if (type instanceof RealType) {
+            return intBitsToFloat(toIntExact((Long) value));
+        }
+        else if (type instanceof VarcharType) {
+            return ((Slice) value).toStringUtf8();
+        }
+        else if (type instanceof VarbinaryType) {
+            return Hex.encodeHexString(((Slice) value).getBytes());
+        }
+        return value;
     }
 
     private static String toConjunct(String columnName, String operator, Object value)
@@ -149,12 +169,12 @@ public final class PinotQueryBuilder
         if (value instanceof Slice) {
             value = ((Slice) value).toStringUtf8();
         }
-        return format("%s %s %s", columnName, operator, singleQuote(value));
+        return format("%s %s %s", quoteIdentifier(columnName), operator, singleQuote(value));
     }
 
     private static String inClauseValues(String columnName, List<Object> singleValues)
     {
-        return format("%s IN (%s)", columnName, singleValues.stream()
+        return format("%s IN (%s)", quoteIdentifier(columnName), singleValues.stream()
                 .map(PinotQueryBuilder::singleQuote)
                 .collect(joining(", ")));
     }
@@ -162,5 +182,10 @@ public final class PinotQueryBuilder
     private static String singleQuote(Object value)
     {
         return format("'%s'", value);
+    }
+
+    private static String quoteIdentifier(String identifier)
+    {
+        return format("\"%s\"", identifier.replaceAll("\"", "\"\""));
     }
 }

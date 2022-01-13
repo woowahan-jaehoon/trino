@@ -19,14 +19,15 @@ import io.trino.execution.Lifespan;
 import io.trino.operator.Driver;
 import io.trino.operator.DriverContext;
 import io.trino.operator.DriverFactory;
-import io.trino.operator.HashBuilderOperator.HashBuilderOperatorFactory;
-import io.trino.operator.JoinBridgeManager;
-import io.trino.operator.LookupJoinOperators;
-import io.trino.operator.LookupSourceProvider;
+import io.trino.operator.OperatorFactories;
 import io.trino.operator.OperatorFactory;
 import io.trino.operator.PagesIndex;
-import io.trino.operator.PartitionedLookupSourceFactory;
 import io.trino.operator.TaskContext;
+import io.trino.operator.TrinoOperatorFactories;
+import io.trino.operator.join.HashBuilderOperator.HashBuilderOperatorFactory;
+import io.trino.operator.join.JoinBridgeManager;
+import io.trino.operator.join.LookupSourceProvider;
+import io.trino.operator.join.PartitionedLookupSourceFactory;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import io.trino.spiller.SingleStreamSpillerFactory;
@@ -43,18 +44,26 @@ import java.util.concurrent.Future;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.trino.benchmark.BenchmarkQueryRunner.createLocalQueryRunner;
+import static io.trino.operator.HashArraySizeSupplier.incrementalLoadFactorHashArraySizeSupplier;
 import static io.trino.operator.PipelineExecutionStrategy.UNGROUPED_EXECUTION;
 import static io.trino.spiller.PartitioningSpillerFactory.unsupportedPartitioningSpillerFactory;
+import static java.util.Objects.requireNonNull;
 
 public class HashJoinBenchmark
         extends AbstractOperatorBenchmark
 {
-    private static final LookupJoinOperators LOOKUP_JOIN_OPERATORS = new LookupJoinOperators();
+    private final OperatorFactories operatorFactories;
     private DriverFactory probeDriverFactory;
 
     public HashJoinBenchmark(LocalQueryRunner localQueryRunner)
     {
+        this(localQueryRunner, new TrinoOperatorFactories());
+    }
+
+    public HashJoinBenchmark(LocalQueryRunner localQueryRunner, OperatorFactories operatorFactories)
+    {
         super(localQueryRunner, "hash_join", 4, 50);
+        this.operatorFactories = requireNonNull(operatorFactories, "operatorFactories is null");
     }
 
     /*
@@ -93,19 +102,22 @@ public class HashJoinBenchmark
                     1_500_000,
                     new PagesIndex.TestingFactory(false),
                     false,
-                    SingleStreamSpillerFactory.unsupportedSingleStreamSpillerFactory());
+                    SingleStreamSpillerFactory.unsupportedSingleStreamSpillerFactory(),
+                    incrementalLoadFactorHashArraySizeSupplier(session));
 
             DriverContext driverContext = taskContext.addPipelineContext(0, false, false, false).addDriverContext();
             DriverFactory buildDriverFactory = new DriverFactory(0, false, false, ImmutableList.of(ordersTableScan, hashBuilder), OptionalInt.empty(), UNGROUPED_EXECUTION);
 
             List<Type> lineItemTypes = getColumnTypes("lineitem", "orderkey", "quantity");
             OperatorFactory lineItemTableScan = createTableScanOperator(0, new PlanNodeId("test"), "lineitem", "orderkey", "quantity");
-            OperatorFactory joinOperator = LOOKUP_JOIN_OPERATORS.innerJoin(
+            OperatorFactory joinOperator = operatorFactories.innerJoin(
                     1,
                     new PlanNodeId("test"),
                     lookupSourceFactoryManager,
-                    lineItemTypes,
                     false,
+                    false,
+                    false,
+                    lineItemTypes,
                     Ints.asList(0),
                     OptionalInt.empty(),
                     Optional.empty(),

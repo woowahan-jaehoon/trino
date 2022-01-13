@@ -16,18 +16,20 @@ package io.trino.spiller;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Closer;
-import com.google.common.io.Files;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.trino.spi.Page;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockEncodingSerde;
+import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.Type;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
@@ -39,7 +41,6 @@ import static com.google.common.io.MoreFiles.listFiles;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static com.google.common.util.concurrent.Futures.getUnchecked;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spiller.FileSingleStreamSpillerFactory.SPILL_FILE_PREFIX;
 import static io.trino.spiller.FileSingleStreamSpillerFactory.SPILL_FILE_SUFFIX;
@@ -51,7 +52,7 @@ import static org.testng.Assert.assertEquals;
 @Test(singleThreaded = true)
 public class TestFileSingleStreamSpillerFactory
 {
-    private final BlockEncodingSerde blockEncodingSerde = createTestMetadataManager().getBlockEncodingSerde();
+    private final BlockEncodingSerde blockEncodingSerde = new TestingBlockEncodingSerde();
     private Closer closer;
     private ListeningExecutorService executor;
     private File spillPath1;
@@ -59,13 +60,14 @@ public class TestFileSingleStreamSpillerFactory
 
     @BeforeMethod
     public void setUp()
+            throws IOException
     {
         closer = Closer.create();
         executor = MoreExecutors.listeningDecorator(Executors.newCachedThreadPool());
         closer.register(() -> executor.shutdownNow());
-        spillPath1 = Files.createTempDir();
+        spillPath1 = Files.createTempDirectory("tmp_spill_path1").toFile();
         closer.register(() -> deleteRecursively(spillPath1.toPath(), ALLOW_INSECURE));
-        spillPath2 = Files.createTempDir();
+        spillPath2 = Files.createTempDirectory("tmp_spill_path2").toFile();
         closer.register(() -> deleteRecursively(spillPath2.toPath(), ALLOW_INSECURE));
     }
 
@@ -141,24 +143,28 @@ public class TestFileSingleStreamSpillerFactory
         return new Page(col1.build());
     }
 
-    @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "No free or healthy space available for spill")
+    @Test
     public void throwsIfNoDiskSpace()
     {
         List<Type> types = ImmutableList.of(BIGINT);
         List<Path> spillPaths = ImmutableList.of(spillPath1.toPath(), spillPath2.toPath());
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths, 0.0);
 
-        spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
+        assertThatThrownBy(() -> spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test")))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("No free or healthy space available for spill");
     }
 
-    @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "No spill paths configured")
+    @Test
     public void throwIfNoSpillPaths()
     {
         List<Path> spillPaths = emptyList();
         List<Type> types = ImmutableList.of(BIGINT);
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths);
 
-        spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
+        assertThatThrownBy(() -> spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test")))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("No spill paths configured");
     }
 
     @Test

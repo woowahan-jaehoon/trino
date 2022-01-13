@@ -26,6 +26,7 @@ import com.google.common.io.CharStreams;
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.airlift.log.Logger;
+import io.airlift.units.Duration;
 import io.trino.plugin.kinesis.KinesisClientProvider;
 import io.trino.plugin.kinesis.KinesisConfig;
 import io.trino.plugin.kinesis.KinesisStreamDescription;
@@ -66,7 +67,7 @@ public class S3TableConfigClient
 
     private final KinesisClientProvider clientManager;
     private final JsonCodec<KinesisStreamDescription> streamDescriptionCodec;
-
+    private final Duration tableDescriptionRefreshInterval;
     private final Optional<String> bucketUrl;
     private volatile long lastCheck;
     private volatile ScheduledFuture<?> updateTaskHandle;
@@ -80,6 +81,7 @@ public class S3TableConfigClient
             JsonCodec<KinesisStreamDescription> jsonCodec)
     {
         requireNonNull(connectorConfig, "connectorConfig is null");
+        this.tableDescriptionRefreshInterval = connectorConfig.getTableDescriptionRefreshInterval();
         this.clientManager = requireNonNull(clientManager, "clientManager is null");
         this.streamDescriptionCodec = requireNonNull(jsonCodec, "jsonCodec is null");
 
@@ -95,10 +97,9 @@ public class S3TableConfigClient
     @PostConstruct
     protected void startS3Updates()
     {
-        // TODO: if required make the update interval configurable
         if (this.bucketUrl.isPresent()) {
             ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-            this.updateTaskHandle = scheduler.scheduleAtFixedRate(this::updateTablesFromS3, 5, 600, TimeUnit.SECONDS);
+            this.updateTaskHandle = scheduler.scheduleAtFixedRate(this::updateTablesFromS3, 5_000, tableDescriptionRefreshInterval.toMillis(), TimeUnit.MILLISECONDS);
         }
     }
 
@@ -166,7 +167,7 @@ public class S3TableConfigClient
             log.info("Completed getting S3 object listing.");
         }
         catch (AmazonClientException e) {
-            log.error("Skipping update as faced error fetching table descriptions from S3 " + e.toString());
+            log.error("Skipping update as faced error fetching table descriptions from S3 %s", e);
         }
         return result;
     }
@@ -197,7 +198,7 @@ public class S3TableConfigClient
                     log.info("Put table description into the map from %s", summary.getKey());
                 }
                 catch (IOException iox) {
-                    log.error("Problem reading input stream from object.", iox);
+                    log.error(iox, "Problem reading input stream from object.");
                     throw new RuntimeException(iox);
                 }
             }

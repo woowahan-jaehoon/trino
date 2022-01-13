@@ -32,9 +32,11 @@ import io.trino.tpch.NationGenerator;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobConf;
+import org.assertj.core.api.Assertions;
 import org.testng.annotations.Test;
 
 import java.io.File;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +49,7 @@ import java.util.function.LongPredicate;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.io.Resources.getResource;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static io.trino.plugin.hive.HiveColumnHandle.createBaseColumn;
 import static io.trino.plugin.hive.HiveStorageFormat.ORC;
@@ -71,8 +74,6 @@ import static org.testng.Assert.assertFalse;
 
 public class TestOrcPageSourceFactory
 {
-    // This file has the contains the TPC-H nation table which each row repeated 1000 times
-    private static final File TEST_FILE = new File(TestOrcPageSourceFactory.class.getClassLoader().getResource("nationFile25kRowsSortedOnNationKey/bucket_00000").getPath());
     private static final Map<NationColumn, Integer> ALL_COLUMNS = ImmutableMap.of(NATION_KEY, 0, NAME, 1, REGION_KEY, 2, COMMENT, 3);
     private static final HivePageSourceFactory PAGE_SOURCE_FACTORY = new OrcPageSourceFactory(
             new OrcReaderConfig(),
@@ -83,7 +84,7 @@ public class TestOrcPageSourceFactory
     @Test
     public void testFullFileRead()
     {
-        assertRead(ALL_COLUMNS, OptionalLong.empty(), Optional.empty(), nationKey -> false);
+        assertRead(ImmutableMap.of(NATION_KEY, 0, NAME, 1, REGION_KEY, 2, COMMENT, 3), OptionalLong.empty(), Optional.empty(), nationKey -> false);
     }
 
     @Test
@@ -123,14 +124,48 @@ public class TestOrcPageSourceFactory
     }
 
     @Test
-    public void testFullFileReadOriginalFilesTable()
+    public void testReadWithAcidVersionValidationHive3()
+            throws Exception
     {
-        File tableFile = new File(TestOrcPageSourceFactory.class.getClassLoader().getResource("fullacidNationTableWithOriginalFiles/000000_0").getPath());
+        File tableFile = new File(getResource("acid_version_validation/acid_version_hive_3/00000_0").toURI());
+        String tablePath = tableFile.getParent();
+
+        Optional<AcidInfo> acidInfo = AcidInfo.builder(new Path(tablePath))
+                .setOrcAcidVersionValidated(false)
+                .build();
+
+        List<Nation> result = readFile(Map.of(), OptionalLong.empty(), acidInfo, tableFile.getPath(), 625);
+        assertEquals(result.size(), 1);
+    }
+
+    @Test
+    public void testReadWithAcidVersionValidationNoVersionInMetadata()
+            throws Exception
+    {
+        File tableFile = new File(getResource("acid_version_validation/no_orc_acid_version_in_metadata/00000_0").toURI());
+        String tablePath = tableFile.getParent();
+
+        Optional<AcidInfo> acidInfo = AcidInfo.builder(new Path(tablePath))
+                .setOrcAcidVersionValidated(false)
+                .build();
+
+        Assertions.assertThatThrownBy(() -> readFile(Map.of(), OptionalLong.empty(), acidInfo, tableFile.getPath(), 730))
+                .hasMessageMatching("Hive transactional tables are supported since Hive 3.0. Expected `hive.acid.version` in ORC metadata" +
+                        " in .*/acid_version_validation/no_orc_acid_version_in_metadata/00000_0 to be >=2 but was <empty>." +
+                        " If you have upgraded from an older version of Hive, make sure a major compaction has been run at least once after the upgrade.");
+    }
+
+    @Test
+    public void testFullFileReadOriginalFilesTable()
+            throws Exception
+    {
+        File tableFile = new File(getResource("fullacidNationTableWithOriginalFiles/000000_0").toURI());
         String tablePath = tableFile.getParent();
 
         AcidInfo acidInfo = AcidInfo.builder(new Path(tablePath))
                 .addDeleteDelta(new Path(tablePath, deleteDeltaSubdir(10000001, 10000001, 0)))
                 .addOriginalFile(new Path(tablePath, "000000_0"), 1780, 0)
+                .setOrcAcidVersionValidated(true)
                 .buildWithRequiredOriginalFiles(0);
 
         List<Nation> expected = expectedResult(OptionalLong.empty(), nationKey -> nationKey == 24, 1);
@@ -169,7 +204,14 @@ public class TestOrcPageSourceFactory
 
     private static List<Nation> readFile(Map<NationColumn, Integer> columns, OptionalLong nationKeyPredicate, Optional<AcidInfo> acidInfo)
     {
-        return readFile(columns, nationKeyPredicate, acidInfo, TEST_FILE.toURI().getPath(), TEST_FILE.length());
+        // This file has the contains the TPC-H nation table which each row repeated 1000 times
+        try {
+            File testFile = new File(getResource("nationFile25kRowsSortedOnNationKey/bucket_00000").toURI());
+            return readFile(columns, nationKeyPredicate, acidInfo, testFile.toURI().getPath(), testFile.length());
+        }
+        catch (URISyntaxException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static List<Nation> readFile(Map<NationColumn, Integer> columns, OptionalLong nationKeyPredicate, Optional<AcidInfo> acidInfo, String filePath, long fileSize)

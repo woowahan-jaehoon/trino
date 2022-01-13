@@ -46,10 +46,12 @@ public class TestLdapConfig
                 .setTrustCertificate(null)
                 .setUserBindSearchPatterns(" : ")
                 .setUserBaseDistinguishedName(null)
+                .setGroupBaseDistinguishedName(null)
                 .setGroupAuthorizationSearchPattern(null)
                 .setBindDistingushedName(null)
                 .setBindPassword(null)
                 .setIgnoreReferrals(false)
+                .setAllowUserNotExist(false)
                 .setLdapCacheTtl(new Duration(1, TimeUnit.HOURS)));
     }
 
@@ -65,9 +67,11 @@ public class TestLdapConfig
                 .put("ldap.ssl-trust-certificate", trustCertificateFile.toString())
                 .put("ldap.user-bind-pattern", "uid=${USER},ou=org,dc=test,dc=com:uid=${USER},ou=alt")
                 .put("ldap.user-base-dn", "dc=test,dc=com")
+                .put("ldap.group-base-dn", "ou=groups,dc=test,dc=com")
                 .put("ldap.group-auth-pattern", "&(objectClass=user)(memberOf=cn=group)(user=username)")
                 .put("ldap.bind-dn", "CN=User Name,OU=CITY_OU,OU=STATE_OU,DC=domain,DC=domain_root")
                 .put("ldap.bind-password", "password1234")
+                .put("ldap.allow-user-not-exist", "true")
                 .put("ldap.ignore-referrals", "true")
                 .put("ldap.cache-ttl", "2m")
                 .build();
@@ -78,10 +82,12 @@ public class TestLdapConfig
                 .setTrustCertificate(trustCertificateFile.toFile())
                 .setUserBindSearchPatterns(ImmutableList.of("uid=${USER},ou=org,dc=test,dc=com", "uid=${USER},ou=alt"))
                 .setUserBaseDistinguishedName("dc=test,dc=com")
+                .setGroupBaseDistinguishedName("ou=groups,dc=test,dc=com")
                 .setGroupAuthorizationSearchPattern("&(objectClass=user)(memberOf=cn=group)(user=username)")
                 .setBindDistingushedName("CN=User Name,OU=CITY_OU,OU=STATE_OU,DC=domain,DC=domain_root")
                 .setBindPassword("password1234")
                 .setIgnoreReferrals(true)
+                .setAllowUserNotExist(true)
                 .setLdapCacheTtl(new Duration(2, TimeUnit.MINUTES));
 
         assertFullMapping(properties, expected);

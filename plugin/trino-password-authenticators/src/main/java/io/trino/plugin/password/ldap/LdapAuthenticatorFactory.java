@@ -39,11 +39,10 @@ public class LdapAuthenticatorFactory
                 binder -> {
                     configBinder(binder).bindConfig(LdapConfig.class);
                     binder.bind(LdapAuthenticator.class).in(Scopes.SINGLETON);
-                    binder.bind(LdapAuthenticatorClient.class).to(JdkLdapAuthenticatorClient.class).in(Scopes.SINGLETON);
+                    binder.bind(LdapClient.class).to(JdkLdapClient.class).in(Scopes.SINGLETON);
                 });
 
         Injector injector = app
-                .strictConfig()
                 .doNotInitializeLogging()
                 .setRequiredConfigurationProperties(config)
                 .initialize();

@@ -21,7 +21,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
-import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.connector.DynamicFilter;
 
 import javax.inject.Inject;
 
@@ -36,13 +36,13 @@ public class BigQueryPageSourceProvider
 {
     private static final Logger log = Logger.get(BigQueryPageSourceProvider.class);
 
-    private final BigQueryStorageClientFactory bigQueryStorageClientFactory;
+    private final BigQueryReadClientFactory bigQueryReadClientFactory;
     private final int maxReadRowsRetries;
 
     @Inject
-    public BigQueryPageSourceProvider(BigQueryStorageClientFactory bigQueryStorageClientFactory, BigQueryConfig config)
+    public BigQueryPageSourceProvider(BigQueryReadClientFactory bigQueryReadClientFactory, BigQueryConfig config)
     {
-        this.bigQueryStorageClientFactory = requireNonNull(bigQueryStorageClientFactory, "bigQueryStorageClientFactory is null");
+        this.bigQueryReadClientFactory = requireNonNull(bigQueryReadClientFactory, "bigQueryReadClientFactory is null");
         this.maxReadRowsRetries = requireNonNull(config, "config is null").getMaxReadRowsRetries();
     }
 
@@ -53,7 +53,7 @@ public class BigQueryPageSourceProvider
             ConnectorSplit split,
             ConnectorTableHandle table,
             List<ColumnHandle> columns,
-            TupleDomain<ColumnHandle> dynamicFilter)
+            DynamicFilter dynamicFilter)
     {
         log.debug("createPageSource(transaction=%s, session=%s, split=%s, table=%s, columns=%s)", transaction, session, split, table, columns);
         BigQuerySplit bigQuerySplit = (BigQuerySplit) split;
@@ -71,6 +71,6 @@ public class BigQueryPageSourceProvider
                 .map(BigQueryColumnHandle.class::cast)
                 .collect(toImmutableList());
 
-        return new BigQueryResultPageSource(bigQueryStorageClientFactory, maxReadRowsRetries, bigQuerySplit, bigQueryColumnHandles);
+        return new BigQueryResultPageSource(bigQueryReadClientFactory.create(session), maxReadRowsRetries, bigQuerySplit, bigQueryColumnHandles);
     }
 }

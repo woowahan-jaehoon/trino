@@ -16,8 +16,9 @@ package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slices;
-import io.trino.metadata.Metadata;
+import io.trino.jmh.Benchmarks;
 import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
@@ -26,7 +27,6 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.ExpressionCompiler;
-import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.relational.LambdaDefinitionExpression;
 import io.trino.sql.relational.RowExpression;
 import io.trino.sql.relational.VariableReferenceExpression;
@@ -44,10 +44,6 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 import org.openjdk.jmh.runner.options.WarmupMode;
 
 import java.util.List;
@@ -56,7 +52,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.function.OperatorType.LESS_THAN;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -107,8 +102,8 @@ public class BenchmarkTransformValue
         @Setup
         public void setup()
         {
-            Metadata metadata = createTestMetadataManager();
-            ExpressionCompiler compiler = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0));
+            TestingFunctionResolution functionResolution = new TestingFunctionResolution();
+            ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
             ImmutableList.Builder<RowExpression> projectionsBuilder = ImmutableList.builder();
             Type elementType;
             Object compareValue;
@@ -129,10 +124,10 @@ public class BenchmarkTransformValue
                     throw new UnsupportedOperationException();
             }
             MapType mapType = mapType(elementType, elementType);
-            ResolvedFunction resolvedFunction = metadata.resolveFunction(
+            ResolvedFunction resolvedFunction = functionResolution.resolveFunction(
                     QualifiedName.of(name),
                     fromTypes(mapType, new FunctionType(ImmutableList.of(elementType), elementType)));
-            ResolvedFunction lessThan = metadata.resolveOperator(LESS_THAN, ImmutableList.of(elementType, elementType));
+            ResolvedFunction lessThan = functionResolution.resolveOperator(LESS_THAN, ImmutableList.of(elementType, elementType));
             projectionsBuilder.add(call(resolvedFunction, ImmutableList.of(
                     field(0, mapType),
                     new LambdaDefinitionExpression(
@@ -197,11 +192,6 @@ public class BenchmarkTransformValue
         data.setup();
         new BenchmarkTransformValue().benchmark(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .warmupMode(WarmupMode.BULK)
-                .include(".*" + BenchmarkTransformValue.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        Benchmarks.benchmark(BenchmarkTransformValue.class, WarmupMode.BULK).run();
     }
 }

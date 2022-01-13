@@ -16,7 +16,8 @@ package io.trino.operator.scalar;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.SliceOutput;
-import io.trino.metadata.Metadata;
+import io.trino.jmh.Benchmarks;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
@@ -24,8 +25,6 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
-import io.trino.sql.gen.ExpressionCompiler;
-import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.RowExpression;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -38,10 +37,6 @@ import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 import org.openjdk.jmh.runner.options.WarmupMode;
 import org.testng.annotations.Test;
 
@@ -51,7 +46,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -111,13 +105,13 @@ public class BenchmarkJsonToMapCast
                     throw new UnsupportedOperationException();
             }
 
-            Metadata metadata = createTestMetadataManager();
+            TestingFunctionResolution functionResolution = new TestingFunctionResolution();
             MapType mapType = mapType(VARCHAR, valueType);
             List<RowExpression> projections = ImmutableList.of(new CallExpression(
-                    metadata.getCoercion(JSON, mapType),
+                    functionResolution.getCoercion(JSON, mapType),
                     ImmutableList.of(field(0, JSON))));
 
-            pageProcessor = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0))
+            pageProcessor = functionResolution.getExpressionCompiler()
                     .compilePageProcessor(Optional.empty(), projections)
                     .get();
 
@@ -200,11 +194,6 @@ public class BenchmarkJsonToMapCast
         data.setup();
         new BenchmarkJsonToMapCast().benchmark(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkJsonToMapCast.class.getSimpleName() + ".*")
-                .warmupMode(WarmupMode.BULK_INDI)
-                .build();
-        new Runner(options).run();
+        Benchmarks.benchmark(BenchmarkJsonToMapCast.class, WarmupMode.BULK_INDI).run();
     }
 }

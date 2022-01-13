@@ -13,23 +13,39 @@
  */
 package io.trino.plugin.clickhouse;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.jdbc.BaseJdbcConnectorTest;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
+import io.trino.testing.sql.SqlExecutor;
 import io.trino.testing.sql.TestTable;
 import org.testng.SkipException;
 import org.testng.annotations.Test;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.plugin.clickhouse.ClickHouseQueryRunner.createClickHouseQueryRunner;
+import static io.trino.plugin.clickhouse.ClickHouseTableProperties.ENGINE_PROPERTY;
+import static io.trino.plugin.clickhouse.ClickHouseTableProperties.ORDER_BY_PROPERTY;
+import static io.trino.plugin.clickhouse.ClickHouseTableProperties.PARTITION_BY_PROPERTY;
+import static io.trino.plugin.clickhouse.ClickHouseTableProperties.PRIMARY_KEY_PROPERTY;
+import static io.trino.plugin.clickhouse.ClickHouseTableProperties.SAMPLE_BY_PROPERTY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.assertions.Assert.assertEquals;
 import static io.trino.testing.sql.TestTable.randomTableSuffix;
+import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
@@ -57,6 +73,11 @@ public class TestClickHouseConnectorTest
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         switch (connectorBehavior) {
+            case SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY:
+            case SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY:
+            case SUPPORTS_TOPN_PUSHDOWN:
+                return false;
+
             case SUPPORTS_COMMENT_ON_TABLE:
             case SUPPORTS_COMMENT_ON_COLUMN:
                 return false;
@@ -64,7 +85,10 @@ public class TestClickHouseConnectorTest
             case SUPPORTS_ARRAY:
                 return false;
 
-            case SUPPORTS_TOPN_PUSHDOWN:
+            case SUPPORTS_DELETE:
+                return false;
+
+            case SUPPORTS_RENAME_SCHEMA:
                 return false;
 
             default:
@@ -170,7 +194,7 @@ public class TestClickHouseConnectorTest
     @Override
     public void testDescribeTable()
     {
-        MaterializedResult expectedColumns = resultBuilder(getQueryRunner().getDefaultSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+        MaterializedResult expectedColumns = resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
                 .row("orderkey", "bigint", "", "")
                 .row("custkey", "bigint", "", "")
                 .row("orderstatus", "varchar", "", "")
@@ -196,6 +220,18 @@ public class TestClickHouseConnectorTest
                         "col_default Nullable(Int64) DEFAULT 43," +
                         "col_nonnull_default Int64 DEFAULT 42," +
                         "col_required2 Int64) ENGINE=Log");
+    }
+
+    @Override
+    public void testCharVarcharComparison()
+    {
+        assertThatThrownBy(super::testCharVarcharComparison)
+                .hasMessageContaining("For query: ")
+                .hasMessageContaining("Actual rows")
+                .hasMessageContaining("Expected rows");
+
+        // TODO run the test with clickhouse.map-string-as-varchar
+        throw new SkipException("");
     }
 
     @Test
@@ -297,6 +333,46 @@ public class TestClickHouseConnectorTest
                 "Invalid value for table property 'partition_by': .*");
     }
 
+    @Test
+    public void testSetTableProperties()
+            throws Exception
+    {
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_alter_table_properties",
+                "(p1 int NOT NULL, p2 int NOT NULL, x VARCHAR) WITH (engine = 'MergeTree', order_by = ARRAY['p1', 'p2'], primary_key = ARRAY['p1', 'p2'])")) {
+            assertThat(getTableProperties("tpch", table.getName()))
+                    .containsExactlyEntriesOf(ImmutableMap.of(
+                            "engine", "MergeTree",
+                            "order_by", "p1, p2",
+                            "partition_by", "",
+                            "primary_key", "p1, p2",
+                            "sample_by", ""));
+
+            assertUpdate("ALTER TABLE " + table.getName() + " SET PROPERTIES sample_by = 'p2'");
+            assertThat(getTableProperties("tpch", table.getName()))
+                    .containsExactlyEntriesOf(ImmutableMap.of(
+                            "engine", "MergeTree",
+                            "order_by", "p1, p2",
+                            "partition_by", "",
+                            "primary_key", "p1, p2",
+                            "sample_by", "p2"));
+        }
+    }
+
+    @Test
+    public void testAlterInvalidTableProperties()
+    {
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_alter_table_properties",
+                "(p1 int NOT NULL, p2 int NOT NULL, x VARCHAR) WITH (engine = 'MergeTree', order_by = ARRAY['p1', 'p2'], primary_key = ARRAY['p1', 'p2'])")) {
+            assertQueryFails(
+                    "ALTER TABLE " + table.getName() + " SET PROPERTIES invalid_property = 'p2'",
+                    "Catalog 'clickhouse' does not support table property 'invalid_property'");
+        }
+    }
+
     @Override
     protected TestTable createTableWithUnsupportedColumn()
     {
@@ -315,10 +391,6 @@ public class TestClickHouseConnectorTest
                 // Querying the column with a boolean predicate subsequently fails with "Cannot apply operator: tinyint = boolean"
                 return Optional.empty();
 
-            case "real":
-                // TODO (https://github.com/trinodb/trino/issues/7101) enable the test
-                return Optional.empty();
-
             case "varbinary":
                 // here in this test class we map ClickHouse String into varchar, so varbinary ends up a varchar
                 return Optional.empty();
@@ -334,5 +406,78 @@ public class TestClickHouseConnectorTest
         }
 
         return Optional.of(dataMappingTestSetup);
+    }
+
+    // TODO: Remove override once decimal predicate pushdown is implemented (https://github.com/trinodb/trino/issues/7100)
+    @Override
+    public void testNumericAggregationPushdown()
+    {
+        String schemaName = getSession().getSchema().orElseThrow();
+        try (TestTable testTable = createAggregationTestTable(schemaName + ".test_aggregation_pushdown",
+                ImmutableList.of("100.000, 100000000.000000000, 100.000, 100000000", "123.321, 123456789.987654321, 123.321, 123456789"))) {
+            assertThat(query("SELECT min(short_decimal), min(long_decimal), min(a_bigint), min(t_double) FROM " + testTable.getName())).isFullyPushedDown();
+            assertThat(query("SELECT max(short_decimal), max(long_decimal), max(a_bigint), max(t_double) FROM " + testTable.getName())).isFullyPushedDown();
+            assertThat(query("SELECT sum(short_decimal), sum(long_decimal), sum(a_bigint), sum(t_double) FROM " + testTable.getName())).isFullyPushedDown();
+            assertThat(query("SELECT avg(short_decimal), avg(long_decimal), avg(a_bigint), avg(t_double) FROM " + testTable.getName())).isFullyPushedDown();
+        }
+    }
+
+    @Override
+    protected TestTable createAggregationTestTable(String name, List<String> rows)
+    {
+        return new TestTable(onRemoteDatabase(), name, "(short_decimal Nullable(Decimal(9, 3)), long_decimal Nullable(Decimal(30, 10)), t_double Nullable(Float64), a_bigint Nullable(Int64)) Engine=Log", rows);
+    }
+
+    @Override
+    protected TestTable createTableWithDoubleAndRealColumns(String name, List<String> rows)
+    {
+        return new TestTable(onRemoteDatabase(), name, "(t_double Nullable(Float64), u_double Nullable(Float64), v_real Nullable(Float32), w_real Nullable(Float32)) Engine=Log", rows);
+    }
+
+    @Test
+    @Override
+    public void testInsertIntoNotNullColumn()
+    {
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_insert_not_null_", "(nullable_col INTEGER, not_null_col INTEGER NOT NULL)")) {
+            assertUpdate(format("INSERT INTO %s (not_null_col) VALUES (2)", table.getName()), 1);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (NULL, 2)");
+            // ClickHouse inserts default values (e.g. 0 for integer column) even if we don't specify default clause in CREATE TABLE statement
+            assertUpdate(format("INSERT INTO %s (nullable_col) VALUES (1)", table.getName()), 1);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (NULL, 2), (1, 0)");
+        }
+
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_commuted_not_null_table", "(nullable_col BIGINT, not_null_col BIGINT NOT NULL)")) {
+            assertUpdate(format("INSERT INTO %s (not_null_col) VALUES (2)", table.getName()), 1);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (NULL, 2)");
+            assertQueryFails(format("INSERT INTO %s (not_null_col, nullable_col) VALUES (NULL, 3)", table.getName()), "NULL value not allowed for NOT NULL column: not_null_col");
+        }
+    }
+
+    @Override
+    protected SqlExecutor onRemoteDatabase()
+    {
+        return clickhouseServer::execute;
+    }
+
+    private Map<String, String> getTableProperties(String schemaName, String tableName)
+            throws SQLException
+    {
+        String sql = "SELECT * FROM system.tables WHERE database = ? AND name = ?";
+        try (Connection connection = DriverManager.getConnection(clickhouseServer.getJdbcUrl());
+                PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+            preparedStatement.setString(1, schemaName);
+            preparedStatement.setString(2, tableName);
+
+            ResultSet resultSet = preparedStatement.executeQuery();
+            ImmutableMap.Builder<String, String> properties = new ImmutableMap.Builder<>();
+            while (resultSet.next()) {
+                properties.put(ENGINE_PROPERTY, resultSet.getString("engine"));
+                properties.put(ORDER_BY_PROPERTY, resultSet.getString("sorting_key"));
+                properties.put(PARTITION_BY_PROPERTY, resultSet.getString("partition_key"));
+                properties.put(PRIMARY_KEY_PROPERTY, resultSet.getString("primary_key"));
+                properties.put(SAMPLE_BY_PROPERTY, resultSet.getString("sampling_key"));
+            }
+            return properties.build();
+        }
     }
 }

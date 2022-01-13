@@ -31,9 +31,11 @@ public class TestServerConfig
     {
         assertRecordedDefaults(recordDefaults(ServerConfig.class)
                 .setCoordinator(true)
+                .setConcurrentStartup(false)
                 .setIncludeExceptionInResponse(true)
                 .setGracePeriod(new Duration(2, MINUTES))
-                .setQueryResultsCompressionEnabled(true));
+                .setQueryResultsCompressionEnabled(true)
+                .setQueryInfoUrlTemplate(null));
     }
 
     @Test
@@ -41,16 +43,20 @@ public class TestServerConfig
     {
         Map<String, String> properties = new ImmutableMap.Builder<String, String>()
                 .put("coordinator", "false")
+                .put("experimental.concurrent-startup", "true")
                 .put("http.include-exception-in-response", "false")
                 .put("shutdown.grace-period", "5m")
                 .put("query-results.compression-enabled", "false")
+                .put("query.info-url-template", "https://example.com/query/${QUERY_ID}")
                 .build();
 
         ServerConfig expected = new ServerConfig()
                 .setCoordinator(false)
+                .setConcurrentStartup(true)
                 .setIncludeExceptionInResponse(false)
                 .setGracePeriod(new Duration(5, MINUTES))
-                .setQueryResultsCompressionEnabled(false);
+                .setQueryResultsCompressionEnabled(false)
+                .setQueryInfoUrlTemplate("https://example.com/query/${QUERY_ID}");
 
         assertFullMapping(properties, expected);
     }

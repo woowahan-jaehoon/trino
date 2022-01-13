@@ -301,10 +301,10 @@ public class FailureAwareThriftMetastoreClient
     }
 
     @Override
-    public boolean revokePrivileges(PrivilegeBag privilegeBag)
+    public boolean revokePrivileges(PrivilegeBag privilegeBag, boolean grantOption)
             throws TException
     {
-        return runWithHandle(() -> delegate.revokePrivileges(privilegeBag));
+        return runWithHandle(() -> delegate.revokePrivileges(privilegeBag, grantOption));
     }
 
     @Override
@@ -378,6 +378,13 @@ public class FailureAwareThriftMetastoreClient
     }
 
     @Override
+    public void unlock(long lockId)
+            throws TException
+    {
+        runWithHandle(() -> delegate.unlock(lockId));
+    }
+
+    @Override
     public String getValidWriteIds(List<String> tableList, long currentTransactionId)
             throws TException
     {
@@ -385,10 +392,10 @@ public class FailureAwareThriftMetastoreClient
     }
 
     @Override
-    public String get_config_value(String name, String defaultValue)
+    public String getConfigValue(String name, String defaultValue)
             throws TException
     {
-        return runWithHandle(() -> delegate.get_config_value(name, defaultValue));
+        return runWithHandle(() -> delegate.getConfigValue(name, defaultValue));
     }
 
     @Override

@@ -15,8 +15,10 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.Session;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.iterative.GroupReference;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
@@ -41,6 +43,7 @@ import java.util.function.Function;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
+import static io.trino.sql.planner.TypeAnalyzer.createTestingTypeAnalyzer;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.any;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
@@ -52,6 +55,7 @@ import static io.trino.sql.planner.iterative.rule.EliminateCrossJoins.isOriginal
 import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
 import static io.trino.sql.tree.ArithmeticBinaryExpression.Operator.ADD;
 import static io.trino.sql.tree.ArithmeticUnaryExpression.Sign.MINUS;
+import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
@@ -65,7 +69,7 @@ public class TestEliminateCrossJoins
     @Test
     public void testEliminateCrossJoin()
     {
-        tester().assertThat(new EliminateCrossJoins(tester().getMetadata()))
+        tester().assertThat(new EliminateCrossJoins(tester().getMetadata(), tester().getTypeAnalyzer()))
                 .setSystemProperty(JOIN_REORDERING_STRATEGY, "ELIMINATE_CROSS_JOINS")
                 .on(crossJoinAndJoin(INNER))
                 .matches(
@@ -81,7 +85,7 @@ public class TestEliminateCrossJoins
     @Test
     public void testRetainOutgoingGroupReferences()
     {
-        tester().assertThat(new EliminateCrossJoins(tester().getMetadata()))
+        tester().assertThat(new EliminateCrossJoins(tester().getMetadata(), tester().getTypeAnalyzer()))
                 .setSystemProperty(JOIN_REORDERING_STRATEGY, "ELIMINATE_CROSS_JOINS")
                 .on(crossJoinAndJoin(INNER))
                 .matches(
@@ -95,7 +99,7 @@ public class TestEliminateCrossJoins
     @Test
     public void testDoNotReorderOuterJoin()
     {
-        tester().assertThat(new EliminateCrossJoins(tester().getMetadata()))
+        tester().assertThat(new EliminateCrossJoins(tester().getMetadata(), tester().getTypeAnalyzer()))
                 .setSystemProperty(JOIN_REORDERING_STRATEGY, "ELIMINATE_CROSS_JOINS")
                 .on(crossJoinAndJoin(JoinNode.Type.LEFT))
                 .doesNotFire();
@@ -111,6 +115,8 @@ public class TestEliminateCrossJoins
     @Test
     public void testJoinOrder()
     {
+        Session session = testSessionBuilder().build();
+
         PlanNode plan =
                 joinNode(
                         joinNode(
@@ -120,7 +126,7 @@ public class TestEliminateCrossJoins
                         "a", "c",
                         "b", "c");
 
-        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator());
+        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator(), session, createTestingTypeAnalyzer(tester().getPlannerContext()), TypeProvider.empty());
 
         assertEquals(
                 getJoinOrder(joinGraph),
@@ -130,6 +136,8 @@ public class TestEliminateCrossJoins
     @Test
     public void testJoinOrderWithRealCrossJoin()
     {
+        Session session = testSessionBuilder().build();
+
         PlanNode leftPlan =
                 joinNode(
                         joinNode(
@@ -150,7 +158,7 @@ public class TestEliminateCrossJoins
 
         PlanNode plan = joinNode(leftPlan, rightPlan);
 
-        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator());
+        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator(), session, createTestingTypeAnalyzer(tester().getPlannerContext()), TypeProvider.empty());
 
         assertEquals(
                 getJoinOrder(joinGraph),
@@ -160,6 +168,8 @@ public class TestEliminateCrossJoins
     @Test
     public void testJoinOrderWithMultipleEdgesBetweenNodes()
     {
+        Session session = testSessionBuilder().build();
+
         PlanNode plan =
                 joinNode(
                         joinNode(
@@ -170,7 +180,7 @@ public class TestEliminateCrossJoins
                         "b1", "c1",
                         "b2", "c2");
 
-        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator());
+        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator(), session, createTestingTypeAnalyzer(tester().getPlannerContext()), TypeProvider.empty());
 
         assertEquals(
                 getJoinOrder(joinGraph),
@@ -180,6 +190,8 @@ public class TestEliminateCrossJoins
     @Test
     public void testDoesNotChangeOrderWithoutCrossJoin()
     {
+        Session session = testSessionBuilder().build();
+
         PlanNode plan =
                 joinNode(
                         joinNode(
@@ -189,7 +201,7 @@ public class TestEliminateCrossJoins
                         values("c"),
                         "b", "c");
 
-        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator());
+        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator(), session, createTestingTypeAnalyzer(tester().getPlannerContext()), TypeProvider.empty());
 
         assertEquals(
                 getJoinOrder(joinGraph),
@@ -199,6 +211,8 @@ public class TestEliminateCrossJoins
     @Test
     public void testDoNotReorderCrossJoins()
     {
+        Session session = testSessionBuilder().build();
+
         PlanNode plan =
                 joinNode(
                         joinNode(
@@ -207,7 +221,7 @@ public class TestEliminateCrossJoins
                         values("c"),
                         "b", "c");
 
-        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator());
+        JoinGraph joinGraph = JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator(), session, createTestingTypeAnalyzer(tester().getPlannerContext()), TypeProvider.empty());
 
         assertEquals(
                 getJoinOrder(joinGraph),
@@ -217,7 +231,7 @@ public class TestEliminateCrossJoins
     @Test
     public void testEliminateCrossJoinWithNonIdentityProjections()
     {
-        tester().assertThat(new EliminateCrossJoins(tester().getMetadata()))
+        tester().assertThat(new EliminateCrossJoins(tester().getMetadata(), tester().getTypeAnalyzer()))
                 .setSystemProperty(JOIN_REORDERING_STRATEGY, "ELIMINATE_CROSS_JOINS")
                 .on(p -> {
                     Symbol a1 = p.symbol("a1");
@@ -278,6 +292,8 @@ public class TestEliminateCrossJoins
     @Test
     public void testGiveUpOnComplexProjections()
     {
+        Session session = testSessionBuilder().build();
+
         PlanNode plan =
                 joinNode(
                         projectNode(
@@ -292,7 +308,7 @@ public class TestEliminateCrossJoins
                         "a2", "c",
                         "b", "c");
 
-        assertEquals(JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator()).size(), 2);
+        assertEquals(JoinGraph.buildFrom(tester().getMetadata(), plan, noLookup(), new PlanNodeIdAllocator(), session, createTestingTypeAnalyzer(tester().getPlannerContext()), TypeProvider.empty()).size(), 2);
     }
 
     private Function<PlanBuilder, PlanNode> crossJoinAndJoin(JoinNode.Type secondJoinType)

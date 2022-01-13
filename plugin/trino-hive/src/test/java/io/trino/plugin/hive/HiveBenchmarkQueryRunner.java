@@ -20,7 +20,6 @@ import io.trino.benchmark.BenchmarkSuite;
 import io.trino.plugin.hive.authentication.HiveIdentity;
 import io.trino.plugin.hive.metastore.Database;
 import io.trino.plugin.hive.metastore.HiveMetastore;
-import io.trino.plugin.hive.testing.TestingHiveConnectorFactory;
 import io.trino.plugin.tpch.TpchConnectorFactory;
 import io.trino.spi.security.PrincipalType;
 import io.trino.testing.LocalQueryRunner;
@@ -28,6 +27,7 @@ import io.trino.testing.LocalQueryRunner;
 import java.io.File;
 import java.io.IOException;
 import java.util.Map;
+import java.util.Optional;
 
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
@@ -73,8 +73,8 @@ public final class HiveBenchmarkQueryRunner
         metastore.createDatabase(identity,
                 Database.builder()
                         .setDatabaseName("tpch")
-                        .setOwnerName("public")
-                        .setOwnerType(PrincipalType.ROLE)
+                        .setOwnerName(Optional.of("public"))
+                        .setOwnerType(Optional.of(PrincipalType.ROLE))
                         .build());
 
         Map<String, String> hiveCatalogConfig = ImmutableMap.<String, String>builder()

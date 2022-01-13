@@ -88,7 +88,7 @@ public class TestPushDistinctLimitIntoTableScan
     @BeforeClass
     public void init()
     {
-        rule = new PushDistinctLimitIntoTableScan(tester().getMetadata());
+        rule = new PushDistinctLimitIntoTableScan(tester().getPlannerContext());
 
         tableHandle = new TableHandle(
                 TEST_CATALOG,
@@ -154,7 +154,8 @@ public class TestPushDistinctLimitIntoTableScan
                     new MockConnectorTableHandle(new SchemaTableName("mock_schema", "mock_nation_aggregated")),
                     List.of(),
                     List.of(),
-                    Map.of()));
+                    Map.of(),
+                    false));
         };
 
         MockConnectorColumnHandle regionkeyHandle = new MockConnectorColumnHandle("regionkey", BIGINT);

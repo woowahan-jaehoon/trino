@@ -17,11 +17,11 @@ package io.trino.sql.planner.optimizations;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import io.trino.FeaturesConfig;
+import io.trino.FeaturesConfig.JoinDistributionType;
+import io.trino.FeaturesConfig.JoinReorderingStrategy;
 import io.trino.Session;
 import io.trino.plugin.tpch.TpchConnectorFactory;
-import io.trino.sql.analyzer.FeaturesConfig;
-import io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType;
-import io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.assertions.RowNumberSymbolMatcher;
@@ -29,19 +29,20 @@ import io.trino.sql.planner.plan.ExchangeNode;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.JoinNode.DistributionType;
 import io.trino.sql.planner.plan.MarkDistinctNode;
-import io.trino.sql.planner.plan.ValuesNode;
+import io.trino.sql.tree.GenericLiteral;
+import io.trino.sql.tree.LongLiteral;
 import io.trino.testing.LocalQueryRunner;
 import org.testng.annotations.Test;
 
 import java.util.Optional;
 
+import static io.trino.FeaturesConfig.JoinDistributionType.PARTITIONED;
+import static io.trino.FeaturesConfig.JoinReorderingStrategy.ELIMINATE_CROSS_JOINS;
 import static io.trino.SystemSessionProperties.IGNORE_DOWNSTREAM_PREFERENCES;
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
 import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
 import static io.trino.SystemSessionProperties.SPILL_ENABLED;
 import static io.trino.SystemSessionProperties.TASK_CONCURRENCY;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType.PARTITIONED;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.ELIMINATE_CROSS_JOINS;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregation;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.any;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyNot;
@@ -119,7 +120,7 @@ public class TestAddExchangesPlans
                                         anyTree(
                                                 exchange(REMOTE, REPARTITION,
                                                         anyTree(
-                                                                values())))))));
+                                                                values(ImmutableList.of("expr"), ImmutableList.of(ImmutableList.of(new GenericLiteral("BIGINT", "1")))))))))));
     }
 
     @Test
@@ -155,8 +156,8 @@ public class TestAddExchangesPlans
                                                 anyTree(
                                                         tableScan("nation", ImmutableMap.of("nationkey", "nationkey")))),
                                         exchange(REMOTE, REPARTITION,
-                                                anyTree(
-                                                        values()))),
+                                                project(
+                                                        values(ImmutableList.of("expr"), ImmutableList.of(ImmutableList.of(new GenericLiteral("BIGINT", "1"))))))),
                                 anyTree(
                                         exchange(REMOTE, REPARTITION,
                                                 anyTree(
@@ -207,13 +208,15 @@ public class TestAddExchangesPlans
                         node(MarkDistinctNode.class,
                                 anyTree(
                                         exchange(REMOTE, REPARTITION, ImmutableList.of(), ImmutableSet.of("partition1", "partition2"),
-                                                anyTree(
-                                                        values(ImmutableList.of("partition1", "partition2")))),
+                                                project(
+                                                        values(
+                                                                ImmutableList.of("field", "partition2", "partition1"),
+                                                                ImmutableList.of(ImmutableList.of(new LongLiteral("1"), new LongLiteral("2"), new LongLiteral("1")))))),
                                         exchange(REMOTE, REPARTITION, ImmutableList.of(), ImmutableSet.of("partition3", "partition3"),
                                                 project(
-                                                        project(ImmutableMap.of("partition3", expression("3"), "partition4", expression("4")),
-                                                                anyTree(
-                                                                        node(ValuesNode.class)))))))));
+                                                        values(
+                                                                ImmutableList.of("partition3", "partition4", "field_0"),
+                                                                ImmutableList.of(ImmutableList.of(new LongLiteral("3"), new LongLiteral("4"), new LongLiteral("1"))))))))));
 
         assertDistributedPlan(
                 query,
@@ -224,13 +227,15 @@ public class TestAddExchangesPlans
                         node(MarkDistinctNode.class,
                                 anyTree(
                                         exchange(REMOTE, REPARTITION, ImmutableList.of(), ImmutableSet.of("partition1"),
-                                                anyTree(
-                                                        values(ImmutableList.of("partition1", "partition2")))),
+                                                project(
+                                                        values(
+                                                                ImmutableList.of("field", "partition2", "partition1"),
+                                                                ImmutableList.of(ImmutableList.of(new LongLiteral("1"), new LongLiteral("2"), new LongLiteral("1")))))),
                                         exchange(REMOTE, REPARTITION, ImmutableList.of(), ImmutableSet.of("partition3"),
                                                 project(
-                                                        project(ImmutableMap.of("partition3", expression("3"), "partition4", expression("4")),
-                                                                anyTree(
-                                                                        node(ValuesNode.class)))))))));
+                                                        values(
+                                                                ImmutableList.of("partition3", "partition4", "field_0"),
+                                                                ImmutableList.of(ImmutableList.of(new LongLiteral("3"), new LongLiteral("4"), new LongLiteral("1"))))))))));
     }
 
     @Test
@@ -426,8 +431,7 @@ public class TestAddExchangesPlans
         assertPlan(
                 "SELECT 10, a FROM (VALUES 1) t(a)",
                 anyTree(
-                        project(
-                                values("a"))));
+                        values(ImmutableList.of("a", "expr"), ImmutableList.of(ImmutableList.of(new LongLiteral("1"), new LongLiteral("10"))))));
 
         assertPlan(
                 "SELECT 1 UNION ALL SELECT 1",
@@ -435,10 +439,8 @@ public class TestAddExchangesPlans
                         exchange(
                                 LOCAL,
                                 REPARTITION,
-                                project(
-                                        values()),
-                                project(
-                                        values()))));
+                                values(ImmutableList.of("expr"), ImmutableList.of(ImmutableList.of(new LongLiteral("1")))),
+                                values(ImmutableList.of("expr_0"), ImmutableList.of(ImmutableList.of(new LongLiteral("1")))))));
     }
 
     private Session spillEnabledWithJoinDistributionType(JoinDistributionType joinDistributionType)

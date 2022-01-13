@@ -16,15 +16,19 @@ package io.trino.execution;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.trino.operator.RetryPolicy;
 import org.testng.annotations.Test;
 
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
+import static java.util.concurrent.TimeUnit.DAYS;
+import static java.util.concurrent.TimeUnit.HOURS;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class TestQueryManagerConfig
 {
@@ -32,28 +36,33 @@ public class TestQueryManagerConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(QueryManagerConfig.class)
-                .setMinQueryExpireAge(new Duration(15, TimeUnit.MINUTES))
+                .setMinQueryExpireAge(new Duration(15, MINUTES))
                 .setMaxQueryHistory(100)
                 .setMaxQueryLength(1_000_000)
                 .setMaxStageCount(100)
                 .setStageCountWarningThreshold(50)
-                .setClientTimeout(new Duration(5, TimeUnit.MINUTES))
+                .setClientTimeout(new Duration(5, MINUTES))
                 .setScheduleSplitBatchSize(1000)
                 .setMinScheduleSplitBatchSize(100)
                 .setMaxConcurrentQueries(1000)
                 .setMaxQueuedQueries(5000)
                 .setInitialHashPartitions(100)
                 .setQueryManagerExecutorPoolSize(5)
-                .setRemoteTaskMinErrorDuration(new Duration(5, TimeUnit.MINUTES))
-                .setRemoteTaskMaxErrorDuration(new Duration(5, TimeUnit.MINUTES))
+                .setRemoteTaskMinErrorDuration(new Duration(5, MINUTES))
+                .setRemoteTaskMaxErrorDuration(new Duration(5, MINUTES))
                 .setRemoteTaskMaxCallbackThreads(1000)
                 .setQueryExecutionPolicy("all-at-once")
-                .setQueryMaxRunTime(new Duration(100, TimeUnit.DAYS))
-                .setQueryMaxExecutionTime(new Duration(100, TimeUnit.DAYS))
-                .setQueryMaxCpuTime(new Duration(1_000_000_000, TimeUnit.DAYS))
+                .setQueryMaxRunTime(new Duration(100, DAYS))
+                .setQueryMaxExecutionTime(new Duration(100, DAYS))
+                .setQueryMaxPlanningTime(new Duration(10, MINUTES))
+                .setQueryMaxCpuTime(new Duration(1_000_000_000, DAYS))
                 .setQueryMaxScanPhysicalBytes(null)
                 .setRequiredWorkers(1)
-                .setRequiredWorkersMaxWait(new Duration(5, TimeUnit.MINUTES)));
+                .setRequiredWorkersMaxWait(new Duration(5, MINUTES))
+                .setRetryPolicy(RetryPolicy.NONE)
+                .setRetryAttempts(4)
+                .setRetryInitialDelay(new Duration(10, SECONDS))
+                .setRetryMaxDelay(new Duration(1, MINUTES)));
     }
 
     @Test
@@ -78,35 +87,45 @@ public class TestQueryManagerConfig
                 .put("query.execution-policy", "phased")
                 .put("query.max-run-time", "2h")
                 .put("query.max-execution-time", "3h")
+                .put("query.max-planning-time", "1h")
                 .put("query.max-cpu-time", "2d")
                 .put("query.max-scan-physical-bytes", "1kB")
                 .put("query-manager.required-workers", "333")
                 .put("query-manager.required-workers-max-wait", "33m")
+                .put("retry-policy", "QUERY")
+                .put("retry-attempts", "0")
+                .put("retry-initial-delay", "1m")
+                .put("retry-max-delay", "1h")
                 .build();
 
         QueryManagerConfig expected = new QueryManagerConfig()
-                .setMinQueryExpireAge(new Duration(30, TimeUnit.SECONDS))
+                .setMinQueryExpireAge(new Duration(30, SECONDS))
                 .setMaxQueryHistory(10)
                 .setMaxQueryLength(10000)
                 .setMaxStageCount(12345)
                 .setStageCountWarningThreshold(12300)
-                .setClientTimeout(new Duration(10, TimeUnit.SECONDS))
+                .setClientTimeout(new Duration(10, SECONDS))
                 .setScheduleSplitBatchSize(99)
                 .setMinScheduleSplitBatchSize(9)
                 .setMaxConcurrentQueries(10)
                 .setMaxQueuedQueries(15)
                 .setInitialHashPartitions(16)
                 .setQueryManagerExecutorPoolSize(11)
-                .setRemoteTaskMinErrorDuration(new Duration(60, TimeUnit.SECONDS))
-                .setRemoteTaskMaxErrorDuration(new Duration(60, TimeUnit.SECONDS))
+                .setRemoteTaskMinErrorDuration(new Duration(60, SECONDS))
+                .setRemoteTaskMaxErrorDuration(new Duration(60, SECONDS))
                 .setRemoteTaskMaxCallbackThreads(10)
                 .setQueryExecutionPolicy("phased")
-                .setQueryMaxRunTime(new Duration(2, TimeUnit.HOURS))
-                .setQueryMaxExecutionTime(new Duration(3, TimeUnit.HOURS))
-                .setQueryMaxCpuTime(new Duration(2, TimeUnit.DAYS))
+                .setQueryMaxRunTime(new Duration(2, HOURS))
+                .setQueryMaxExecutionTime(new Duration(3, HOURS))
+                .setQueryMaxPlanningTime(new Duration(1, HOURS))
+                .setQueryMaxCpuTime(new Duration(2, DAYS))
                 .setQueryMaxScanPhysicalBytes(DataSize.of(1, KILOBYTE))
                 .setRequiredWorkers(333)
-                .setRequiredWorkersMaxWait(new Duration(33, TimeUnit.MINUTES));
+                .setRequiredWorkersMaxWait(new Duration(33, MINUTES))
+                .setRetryPolicy(RetryPolicy.QUERY)
+                .setRetryAttempts(0)
+                .setRetryInitialDelay(new Duration(1, MINUTES))
+                .setRetryMaxDelay(new Duration(1, HOURS));
 
         assertFullMapping(properties, expected);
     }

@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.Type;
 import io.trino.spiller.AesSpillCipher;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -31,11 +32,7 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 import org.testng.annotations.Test;
 
 import java.util.ArrayList;
@@ -45,7 +42,7 @@ import java.util.Optional;
 import java.util.Random;
 
 import static io.airlift.slice.Slices.utf8Slice;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.operator.PageAssertions.assertPageEquals;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -130,7 +127,7 @@ public class BenchmarkPagesSerde
 
         private PagesSerde createPagesSerde()
         {
-            PagesSerdeFactory serdeFactory = new PagesSerdeFactory(createTestMetadataManager().getBlockEncodingSerde(), compressed);
+            PagesSerdeFactory serdeFactory = new PagesSerdeFactory(new TestingBlockEncodingSerde(), compressed);
             return encrypted ? serdeFactory.createPagesSerdeForSpill(Optional.of(new AesSpillCipher())) : serdeFactory.createPagesSerde();
         }
 
@@ -225,11 +222,9 @@ public class BenchmarkPagesSerde
         System.out.println("Page Size Sum: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).sum());
         System.out.println("Page count: " + data.dataPages.length);
         System.out.println("Compressed: " + Arrays.stream(data.serializedPages).filter(SerializedPage::isCompressed).count());
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .jvmArgs("-Xms4g", "-Xmx4g")
-                .include(".*" + BenchmarkPagesSerde.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+
+        benchmark(BenchmarkPagesSerde.class)
+                .withOptions(optionsBuilder -> optionsBuilder.jvmArgs("-Xms4g", "-Xmx4g"))
+                .run();
     }
 }

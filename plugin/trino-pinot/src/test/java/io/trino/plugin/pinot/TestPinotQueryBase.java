@@ -42,7 +42,7 @@ public class TestPinotQueryBase
     protected List<String> getColumnNames(String table)
     {
         return pinotMetadata.getPinotColumns(table).stream()
-                .map(PinotColumn::getName)
+                .map(PinotColumnHandle::getColumnName)
                 .collect(toImmutableList());
     }
 
@@ -94,6 +94,19 @@ public class TestPinotQueryBase
                         .addSingleValueDimension("col_1", DataType.STRING)
                         .addSingleValueDimension("col_2", DataType.LONG)
                         .addSingleValueDimension("col_3", DataType.STRING)
+                        .build())
+                .put("primitive_types_table", new SchemaBuilder().setSchemaName("primitive_types_table")
+                        .addSingleValueDimension("string_col", DataType.STRING)
+                        .addSingleValueDimension("long_col", DataType.LONG)
+                        .addSingleValueDimension("int_col", DataType.INT)
+                        .addSingleValueDimension("bool_col", DataType.BOOLEAN)
+                        .addSingleValueDimension("double_col", DataType.DOUBLE)
+                        .addSingleValueDimension("float_col", DataType.FLOAT)
+                        .addSingleValueDimension("bytes_col", DataType.BYTES)
+                        .build())
+                .put("quotes_in_column_names", new SchemaBuilder().setSchemaName("quotes_in_column_names")
+                        .addSingleValueDimension("non_quoted", DataType.STRING)
+                        .addSingleValueDimension("qu\"ot\"ed", DataType.STRING)
                         .build())
                 .build();
     }

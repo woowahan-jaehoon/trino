@@ -20,6 +20,7 @@ import com.google.common.io.Closer;
 import io.airlift.drift.server.DriftServer;
 import io.trino.Session;
 import io.trino.connector.CatalogName;
+import io.trino.cost.ScalarStatsCalculator;
 import io.trino.metadata.TableHandle;
 import io.trino.plugin.thrift.ThriftColumnHandle;
 import io.trino.plugin.thrift.ThriftPlugin;
@@ -29,9 +30,7 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.sql.parser.SqlParser;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.iterative.rule.PruneTableScanColumns;
 import io.trino.sql.planner.iterative.rule.PushProjectionIntoTableScan;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
@@ -46,7 +45,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static com.google.common.base.Predicates.equalTo;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.plugin.thrift.integration.ThriftQueryRunner.driftServerPort;
 import static io.trino.plugin.thrift.integration.ThriftQueryRunner.startThriftServers;
@@ -130,9 +128,10 @@ public class TestThriftProjectionPushdown
     @Test
     public void testDoesNotFire()
     {
-        PushProjectionIntoTableScan optimizer = new PushProjectionIntoTableScan(
-                tester().getMetadata(),
-                new TypeAnalyzer(new SqlParser(), tester().getMetadata()));
+        PushProjectionIntoTableScan pushProjectionIntoTableScan = new PushProjectionIntoTableScan(
+                tester().getPlannerContext(),
+                tester().getTypeAnalyzer(),
+                new ScalarStatsCalculator(tester().getPlannerContext(), tester().getTypeAnalyzer()));
 
         String columnName = "orderstatus";
         ColumnHandle columnHandle = new ThriftColumnHandle(columnName, VARCHAR, "", false);
@@ -143,7 +142,7 @@ public class TestThriftProjectionPushdown
                 TupleDomain.all(),
                 Optional.of(ImmutableSet.of(columnHandle)));
 
-        tester().assertThat(optimizer)
+        tester().assertThat(pushProjectionIntoTableScan)
                 .on(p -> {
                     Symbol orderStatusSymbol = p.symbol(columnName, VARCHAR);
                     return p.project(
@@ -166,8 +165,9 @@ public class TestThriftProjectionPushdown
     public void testProjectionPushdown()
     {
         PushProjectionIntoTableScan pushProjectionIntoTableScan = new PushProjectionIntoTableScan(
-                tester().getMetadata(),
-                new TypeAnalyzer(new SqlParser(), tester().getMetadata()));
+                tester().getPlannerContext(),
+                tester().getTypeAnalyzer(),
+                new ScalarStatsCalculator(tester().getPlannerContext(), tester().getTypeAnalyzer()));
 
         TableHandle inputTableHandle = NATION_TABLE;
         String columnName = "orderstatus";
@@ -196,9 +196,9 @@ public class TestThriftProjectionPushdown
                 .matches(project(
                         ImmutableMap.of("expr_2", expression(new SymbolReference(columnName))),
                         tableScan(
-                                equalTo(projectedThriftHandle),
+                                projectedThriftHandle::equals,
                                 TupleDomain.all(),
-                                ImmutableMap.of(columnName, equalTo(columnHandle)))));
+                                ImmutableMap.of(columnName, columnHandle::equals))));
     }
 
     @Test
@@ -229,12 +229,12 @@ public class TestThriftProjectionPushdown
                 .matches(project(
                         ImmutableMap.of("expr", expression(new SymbolReference(nationKeyColumn.getColumnName()))),
                         tableScan(
-                                equalTo(new ThriftTableHandle(
+                                new ThriftTableHandle(
                                         TINY_SCHEMA,
                                         "nation",
                                         TupleDomain.all(),
-                                        Optional.of(ImmutableSet.of(nationKeyColumn)))),
+                                        Optional.of(ImmutableSet.of(nationKeyColumn)))::equals,
                                 TupleDomain.all(),
-                                ImmutableMap.of(nationKeyColumn.getColumnName(), equalTo(nationKeyColumn)))));
+                                ImmutableMap.of(nationKeyColumn.getColumnName(), nationKeyColumn::equals))));
     }
 }

@@ -14,8 +14,6 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.plugin.hive.HdfsEnvironment;
-import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.procedure.Procedure;
@@ -26,7 +24,6 @@ import javax.inject.Provider;
 
 import java.lang.invoke.MethodHandle;
 
-import static io.trino.plugin.iceberg.IcebergUtil.getIcebergTable;
 import static io.trino.spi.block.MethodHandleUtil.methodHandle;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -43,14 +40,12 @@ public class RollbackToSnapshotProcedure
             String.class,
             Long.class);
 
-    private final IcebergMetadataFactory metadataFactory;
-    private final HdfsEnvironment hdfsEnvironment;
+    private final TrinoCatalogFactory catalogFactory;
 
     @Inject
-    public RollbackToSnapshotProcedure(IcebergMetadataFactory metadataFactory, HdfsEnvironment hdfsEnvironment)
+    public RollbackToSnapshotProcedure(TrinoCatalogFactory catalogFactory)
     {
-        this.metadataFactory = requireNonNull(metadataFactory, "metadataFactory is null");
-        this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
+        this.catalogFactory = requireNonNull(catalogFactory, "catalogFactory is null");
     }
 
     @Override
@@ -69,9 +64,7 @@ public class RollbackToSnapshotProcedure
     public void rollbackToSnapshot(ConnectorSession clientSession, String schema, String table, Long snapshotId)
     {
         SchemaTableName schemaTableName = new SchemaTableName(schema, table);
-        IcebergMetadata metadata = metadataFactory.create();
-        HiveMetastore metastore = metadata.getMetastore();
-        Table icebergTable = getIcebergTable(metastore, hdfsEnvironment, clientSession, schemaTableName);
+        Table icebergTable = catalogFactory.create().loadTable(clientSession, schemaTableName);
         icebergTable.rollback().toSnapshotId(snapshotId).commit();
     }
 }

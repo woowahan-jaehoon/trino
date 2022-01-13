@@ -14,41 +14,23 @@
 package io.trino.plugin.cassandra;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.testing.BaseConnectorSmokeTest;
 import io.trino.testing.QueryRunner;
-import io.trino.testing.TestingConnectorBehavior;
+
+import java.sql.Timestamp;
 
 import static io.trino.plugin.cassandra.CassandraQueryRunner.createCassandraQueryRunner;
+import static io.trino.plugin.cassandra.CassandraTestingUtils.createTestTables;
 
 public class TestCassandraLatestConnectorSmokeTest
-        extends BaseConnectorSmokeTest
+        extends BaseCassandraConnectorSmokeTest
 {
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        CassandraServer server = closeAfterClass(new CassandraServer("3.11.9"));
+        CassandraServer server = closeAfterClass(new CassandraServer("3.11.10"));
+        CassandraSession session = server.getSession();
+        createTestTables(session, KEYSPACE, Timestamp.from(TIMESTAMP_VALUE.toInstant()));
         return createCassandraQueryRunner(server, ImmutableMap.of(), REQUIRED_TPCH_TABLES);
-    }
-
-    @Override
-    protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
-    {
-        switch (connectorBehavior) {
-            case SUPPORTS_CREATE_SCHEMA:
-                return false;
-
-            case SUPPORTS_RENAME_TABLE:
-                return false;
-
-            case SUPPORTS_DELETE:
-                return true;
-
-            case SUPPORTS_ROW_LEVEL_DELETE:
-                return false;
-
-            default:
-                return super.hasBehavior(connectorBehavior);
-        }
     }
 }

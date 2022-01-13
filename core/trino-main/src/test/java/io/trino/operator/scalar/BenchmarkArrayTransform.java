@@ -14,7 +14,8 @@
 package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.Metadata;
+import io.trino.jmh.Benchmarks;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
@@ -24,7 +25,6 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.ExpressionCompiler;
-import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.ConstantExpression;
 import io.trino.sql.relational.InputReferenceExpression;
@@ -44,10 +44,6 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.util.List;
 import java.util.Optional;
@@ -57,7 +53,6 @@ import java.util.stream.Collectors;
 
 import static com.google.common.base.Verify.verify;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.function.OperatorType.LESS_THAN;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -105,15 +100,15 @@ public class BenchmarkArrayTransform
         @Setup
         public void setup()
         {
-            Metadata metadata = createTestMetadataManager();
-            ExpressionCompiler compiler = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0));
+            TestingFunctionResolution functionResolution = new TestingFunctionResolution();
+            ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
             ImmutableList.Builder<RowExpression> projectionsBuilder = ImmutableList.builder();
             Block[] blocks = new Block[TYPES.size()];
             for (int i = 0; i < TYPES.size(); i++) {
                 Type elementType = TYPES.get(i);
                 ArrayType arrayType = new ArrayType(elementType);
                 projectionsBuilder.add(new CallExpression(
-                        metadata.resolveFunction(
+                        functionResolution.resolveFunction(
                                 QualifiedName.of("transform"),
                                 fromTypes(arrayType, new FunctionType(ImmutableList.of(BIGINT), BOOLEAN))),
                         ImmutableList.of(
@@ -122,7 +117,7 @@ public class BenchmarkArrayTransform
                                         ImmutableList.of(BIGINT),
                                         ImmutableList.of("x"),
                                         new CallExpression(
-                                                metadata.resolveOperator(LESS_THAN, ImmutableList.of(BIGINT, BIGINT)),
+                                                functionResolution.resolveOperator(LESS_THAN, ImmutableList.of(BIGINT, BIGINT)),
                                                 ImmutableList.of(new ConstantExpression(0L, BIGINT), new VariableReferenceExpression("x", BIGINT)))))));
                 blocks[i] = createChannel(POSITIONS, ARRAY_SIZE, arrayType);
             }
@@ -175,10 +170,6 @@ public class BenchmarkArrayTransform
         data.setup();
         new BenchmarkArrayTransform().benchmark(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkArrayTransform.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        Benchmarks.benchmark(BenchmarkArrayTransform.class).run();
     }
 }

@@ -24,17 +24,15 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
+import org.testng.annotations.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.spi.predicate.Range.range;
 import static io.trino.spi.type.BigintType.BIGINT;
 
@@ -48,11 +46,19 @@ public class BenchmarkSortedRangeSet
     @Benchmark
     public SortedRangeSet benchmarkBuilder(Data data)
     {
-        SortedRangeSet build = new SortedRangeSet.Builder(BIGINT)
-                .addAll(data.ranges)
-                .build();
+        return SortedRangeSet.buildFromUnsortedRanges(BIGINT, data.ranges);
+    }
 
-        return build;
+    @Benchmark
+    public List<SortedRangeSet> ofSingleRange(Data data)
+    {
+        List<SortedRangeSet> result = new ArrayList<>(data.ranges.size());
+        for (Range range : data.ranges) {
+            // intentionally going through public interface to cover any overhead or code path redirection this could incur
+            ValueSet valueSet = ValueSet.ofRanges(range);
+            result.add((SortedRangeSet) valueSet);
+        }
+        return result;
     }
 
     @Benchmark
@@ -114,6 +120,27 @@ public class BenchmarkSortedRangeSet
         List<Boolean> result = new ArrayList<>(dataRanges.size() - 1);
         for (int index = 0; index < dataRanges.size() - 1; index++) {
             result.add(dataRanges.get(index).overlaps(dataRanges.get(index + 1)));
+        }
+        return result;
+    }
+
+    @Benchmark
+    public List<ValueSet> intersectSmall(Data data)
+    {
+        return benchmarkIntersect(data.smallRanges);
+    }
+
+    @Benchmark
+    public List<ValueSet> intersectLarge(Data data)
+    {
+        return benchmarkIntersect(data.largeRanges);
+    }
+
+    private List<ValueSet> benchmarkIntersect(List<SortedRangeSet> dataRanges)
+    {
+        List<ValueSet> result = new ArrayList<>(dataRanges.size() - 1);
+        for (int index = 0; index < dataRanges.size() - 1; index++) {
+            result.add(dataRanges.get(index).intersect(dataRanges.get(index + 1)));
         }
         return result;
     }
@@ -244,14 +271,41 @@ public class BenchmarkSortedRangeSet
         }
     }
 
+    @Test
+    public void test()
+    {
+        Data data = new Data();
+        data.init();
+
+        benchmarkBuilder(data);
+
+        ofSingleRange(data);
+
+        equalsSmall(data);
+        equalsLarge(data);
+
+        unionSmall(data);
+        unionLarge(data);
+
+        overlapsSmall(data);
+        overlapsLarge(data);
+
+        intersectSmall(data);
+        intersectLarge(data);
+
+        containsValueSmall(data);
+        containsValueLarge(data);
+
+        complementSmall(data);
+        complementLarge(data);
+
+        getOrderedRangesSmall(data);
+        getOrderedRangesLarge(data);
+    }
+
     public static void main(String[] args)
             throws RunnerException
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkSortedRangeSet.class.getSimpleName() + ".*")
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkSortedRangeSet.class).run();
     }
 }

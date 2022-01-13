@@ -119,6 +119,11 @@ public abstract class PlanVisitor<R, C>
         return visitPlan(node, context);
     }
 
+    public R visitRefreshMaterializedView(RefreshMaterializedViewNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
     public R visitTableWriter(TableWriterNode node, C context)
     {
         return visitPlan(node, context);
@@ -130,6 +135,11 @@ public abstract class PlanVisitor<R, C>
     }
 
     public R visitUpdate(UpdateNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitTableExecute(TableExecuteNode node, C context)
     {
         return visitPlan(node, context);
     }
@@ -215,6 +225,11 @@ public abstract class PlanVisitor<R, C>
     }
 
     public R visitCorrelatedJoin(CorrelatedJoinNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitPatternRecognition(PatternRecognitionNode node, C context)
     {
         return visitPlan(node, context);
     }

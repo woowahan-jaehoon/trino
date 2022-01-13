@@ -48,7 +48,9 @@ import io.trino.execution.TaskInfo;
 import io.trino.execution.buffer.PagesSerde;
 import io.trino.execution.buffer.PagesSerdeFactory;
 import io.trino.execution.buffer.SerializedPage;
+import io.trino.memory.context.SimpleLocalMemoryContext;
 import io.trino.operator.ExchangeClient;
+import io.trino.operator.ExchangeClientSupplier;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.Page;
 import io.trino.spi.QueryId;
@@ -70,7 +72,6 @@ import io.trino.sql.tree.NumericParameter;
 import io.trino.sql.tree.RowDataType;
 import io.trino.sql.tree.TypeParameter;
 import io.trino.transaction.TransactionId;
-import io.trino.util.Failures;
 
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
@@ -95,10 +96,14 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.addTimeout;
+import static io.trino.SystemSessionProperties.getRetryPolicy;
 import static io.trino.SystemSessionProperties.isExchangeCompressionEnabled;
 import static io.trino.execution.QueryState.FAILED;
+import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
+import static io.trino.server.protocol.QueryInfoUrlFactory.getQueryInfoUri;
 import static io.trino.server.protocol.QueryResultRows.queryResultRowsBuilder;
 import static io.trino.server.protocol.Slug.Context.EXECUTING_QUERY;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -122,6 +127,7 @@ class Query
     private final QueryId queryId;
     private final Session session;
     private final Slug slug;
+    private final Optional<URI> queryInfoUrl;
 
     @GuardedBy("this")
     private final ExchangeClient exchangeClient;
@@ -187,12 +193,18 @@ class Query
             Session session,
             Slug slug,
             QueryManager queryManager,
-            ExchangeClient exchangeClient,
+            Optional<URI> queryInfoUrl,
+            ExchangeClientSupplier exchangeClientSupplier,
             Executor dataProcessorExecutor,
             ScheduledExecutorService timeoutExecutor,
             BlockEncodingSerde blockEncodingSerde)
     {
-        Query result = new Query(session, slug, queryManager, exchangeClient, dataProcessorExecutor, timeoutExecutor, blockEncodingSerde);
+        ExchangeClient exchangeClient = exchangeClientSupplier.get(
+                new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), Query.class.getSimpleName()),
+                queryManager::outputTaskFailed,
+                getRetryPolicy(session));
+
+        Query result = new Query(session, slug, queryManager, queryInfoUrl, exchangeClient, dataProcessorExecutor, timeoutExecutor, blockEncodingSerde);
 
         result.queryManager.addOutputInfoListener(result.getQueryId(), result::setQueryOutputInfo);
 
@@ -210,6 +222,7 @@ class Query
             Session session,
             Slug slug,
             QueryManager queryManager,
+            Optional<URI> queryInfoUrl,
             ExchangeClient exchangeClient,
             Executor resultsProcessorExecutor,
             ScheduledExecutorService timeoutExecutor,
@@ -218,16 +231,17 @@ class Query
         requireNonNull(session, "session is null");
         requireNonNull(slug, "slug is null");
         requireNonNull(queryManager, "queryManager is null");
+        requireNonNull(queryInfoUrl, "queryInfoUrl is null");
         requireNonNull(exchangeClient, "exchangeClient is null");
         requireNonNull(resultsProcessorExecutor, "resultsProcessorExecutor is null");
         requireNonNull(timeoutExecutor, "timeoutExecutor is null");
         requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
 
         this.queryManager = queryManager;
-
         this.queryId = session.getQueryId();
         this.session = session;
         this.slug = slug;
+        this.queryInfoUrl = queryInfoUrl;
         this.exchangeClient = exchangeClient;
         this.resultsProcessorExecutor = resultsProcessorExecutor;
         this.timeoutExecutor = timeoutExecutor;
@@ -336,7 +350,7 @@ class Query
         }
 
         // wait for a results data or query to finish, up to the wait timeout
-        ListenableFuture<?> futureStateChange = addTimeout(
+        ListenableFuture<Void> futureStateChange = addTimeout(
                 getFutureStateChange(),
                 () -> null,
                 wait,
@@ -346,10 +360,10 @@ class Query
         return Futures.transform(futureStateChange, ignored -> getNextResult(token, uriInfo, targetResultSize), resultsProcessorExecutor);
     }
 
-    private synchronized ListenableFuture<?> getFutureStateChange()
+    private synchronized ListenableFuture<Void> getFutureStateChange()
     {
         // if the exchange client is open, wait for data
-        if (!exchangeClient.isClosed()) {
+        if (!exchangeClient.isFinished()) {
             return exchangeClient.isBlocked();
         }
 
@@ -359,7 +373,7 @@ class Query
             return queryDoneFuture(queryManager.getQueryState(queryId));
         }
         catch (NoSuchElementException e) {
-            return immediateFuture(null);
+            return immediateVoidFuture();
         }
     }
 
@@ -406,15 +420,13 @@ class Query
 
         verify(nextToken.isPresent(), "Cannot generate next result when next token is not present");
         verify(token == nextToken.getAsLong(), "Expected token to equal next token");
-        URI queryHtmlUri = uriInfo.getRequestUriBuilder()
-                .replacePath("ui/query.html")
-                .replaceQuery(queryId.toString())
-                .build();
 
         // get the query info before returning
         // force update if query manager is closed
         QueryInfo queryInfo = queryManager.getFullQueryInfo(queryId);
         queryManager.recordHeartbeat(queryId);
+
+        closeExchangeClientIfNecessary(queryInfo);
 
         // fetch result data from exchange
         QueryResultRows resultRows = removePagesFromExchange(queryInfo, targetResultSize.toBytes());
@@ -425,14 +437,12 @@ class Query
             updateCount = updatedRowsCount.orElse(null);
         }
 
-        closeExchangeClientIfNecessary(queryInfo);
-
         // advance next token
         // only return a next if
         // (1) the query is not done AND the query state is not FAILED
         //   OR
         // (2)there is more data to send (due to buffering)
-        if ((!queryInfo.isFinalQueryInfo() && queryInfo.getState() != FAILED) || !exchangeClient.isClosed()) {
+        if (queryInfo.getState() != FAILED && (!queryInfo.isFinalQueryInfo() || !exchangeClient.isFinished() || (lastResult != null && lastResult.getData() != null))) {
             nextToken = OptionalLong.of(token + 1);
         }
         else {
@@ -442,9 +452,10 @@ class Query
         URI nextResultsUri = null;
         URI partialCancelUri = null;
         if (nextToken.isPresent()) {
-            nextResultsUri = createNextResultsUri(uriInfo, nextToken.getAsLong());
+            long nextToken = this.nextToken.getAsLong();
+            nextResultsUri = createNextResultsUri(uriInfo, nextToken);
             partialCancelUri = findCancelableLeafStage(queryInfo)
-                    .map(stage -> this.createPartialCancelUri(stage, uriInfo, nextToken.getAsLong()))
+                    .map(stage -> createPartialCancelUri(stage, uriInfo, nextToken))
                     .orElse(null);
         }
 
@@ -471,7 +482,7 @@ class Query
         // first time through, self is null
         QueryResults queryResults = new QueryResults(
                 queryId.toString(),
-                queryHtmlUri,
+                getQueryInfoUri(queryInfoUrl, queryId, uriInfo),
                 partialCancelUri,
                 nextResultsUri,
                 resultRows.getColumns().orElse(null),
@@ -540,14 +551,14 @@ class Query
         }
     }
 
-    private void handleSerializationException(Throwable exception)
+    private synchronized void handleSerializationException(Throwable exception)
     {
         // failQuery can throw exception if query has already finished.
         try {
             queryManager.failQuery(queryId, exception);
         }
         catch (RuntimeException e) {
-            log.debug("Could not fail query", e);
+            log.debug(e, "Could not fail query");
         }
 
         if (typeSerializationException.isEmpty()) {
@@ -571,18 +582,16 @@ class Query
             types = outputInfo.getColumnTypes();
         }
 
-        for (URI outputLocation : outputInfo.getBufferLocations()) {
-            exchangeClient.addLocation(outputLocation);
-        }
+        outputInfo.getBufferLocations().forEach(exchangeClient::addLocation);
         if (outputInfo.isNoMoreBufferLocations()) {
             exchangeClient.noMoreLocations();
         }
     }
 
-    private ListenableFuture<?> queryDoneFuture(QueryState currentState)
+    private ListenableFuture<Void> queryDoneFuture(QueryState currentState)
     {
         if (currentState.isDone()) {
-            return immediateFuture(null);
+            return immediateVoidFuture();
         }
         return Futures.transformAsync(queryManager.getStateChange(queryId, currentState), this::queryDoneFuture, directExecutor());
     }
@@ -628,23 +637,23 @@ class Query
                 if (dataTimeType.getType() == DateTimeDataType.Type.TIMESTAMP && !dataTimeType.isWithTimeZone()) {
                     return TIMESTAMP;
                 }
-                else if (dataTimeType.getType() == DateTimeDataType.Type.TIME && !dataTimeType.isWithTimeZone()) {
+                if (dataTimeType.getType() == DateTimeDataType.Type.TIME && !dataTimeType.isWithTimeZone()) {
                     return TIME;
                 }
-                else if (dataTimeType.getType() == DateTimeDataType.Type.TIME && dataTimeType.isWithTimeZone()) {
-                    return TIMESTAMP_WITH_TIME_ZONE;
+                if (dataTimeType.getType() == DateTimeDataType.Type.TIME && dataTimeType.isWithTimeZone()) {
+                    return TIME_WITH_TIME_ZONE;
                 }
             }
 
             return ExpressionFormatter.formatExpression(type);
         }
-        else if (type instanceof RowDataType) {
+        if (type instanceof RowDataType) {
             RowDataType rowDataType = (RowDataType) type;
             return rowDataType.getFields().stream()
                     .map(field -> field.getName().map(name -> name + " ").orElse("") + formatType(field.getType()))
                     .collect(Collectors.joining(", ", ROW + "(", ")"));
         }
-        else if (type instanceof GenericDataType) {
+        if (type instanceof GenericDataType) {
             GenericDataType dataType = (GenericDataType) type;
             if (dataType.getArguments().isEmpty()) {
                 return dataType.getName().getValue();
@@ -655,14 +664,14 @@ class Query
                         if (parameter instanceof NumericParameter) {
                             return ((NumericParameter) parameter).getValue();
                         }
-                        else if (parameter instanceof TypeParameter) {
+                        if (parameter instanceof TypeParameter) {
                             return formatType(((TypeParameter) parameter).getValue());
                         }
                         throw new IllegalArgumentException("Unsupported parameter type: " + parameter.getClass().getName());
                     })
                     .collect(Collectors.joining(", ", dataType.getName().getValue() + "(", ")"));
         }
-        else if (type instanceof IntervalDayTimeDataType) {
+        if (type instanceof IntervalDayTimeDataType) {
             return ExpressionFormatter.formatExpression(type);
         }
 
@@ -675,13 +684,13 @@ class Query
             if (signature.getBase().equalsIgnoreCase(TIMESTAMP)) {
                 return new ClientTypeSignature(TIMESTAMP);
             }
-            else if (signature.getBase().equalsIgnoreCase(TIMESTAMP_WITH_TIME_ZONE)) {
+            if (signature.getBase().equalsIgnoreCase(TIMESTAMP_WITH_TIME_ZONE)) {
                 return new ClientTypeSignature(TIMESTAMP_WITH_TIME_ZONE);
             }
-            else if (signature.getBase().equalsIgnoreCase(TIME)) {
+            if (signature.getBase().equalsIgnoreCase(TIME)) {
                 return new ClientTypeSignature(TIME);
             }
-            else if (signature.getBase().equalsIgnoreCase(TIME_WITH_TIME_ZONE)) {
+            if (signature.getBase().equalsIgnoreCase(TIME_WITH_TIME_ZONE)) {
                 return new ClientTypeSignature(TIME_WITH_TIME_ZONE);
             }
         }
@@ -770,6 +779,8 @@ class Query
                 .setProcessedRows(stageStats.getRawInputPositions())
                 .setProcessedBytes(stageStats.getRawInputDataSize().toBytes())
                 .setPhysicalInputBytes(stageStats.getPhysicalInputDataSize().toBytes())
+                .setFailedTasks(stageStats.getFailedTasks())
+                .setCoordinatorOnly(stageInfo.isCoordinatorOnly())
                 .setSubStages(subStages.build())
                 .build();
     }
@@ -830,7 +841,7 @@ class Query
             executionFailure = queryInfo.getFailureInfo();
         }
         else if (exception.isPresent()) {
-            executionFailure = Failures.toFailure(exception.get());
+            executionFailure = toFailure(exception.get());
         }
         else {
             log.warn("Query %s in state %s has no failure info", queryInfo.getQueryId(), state);

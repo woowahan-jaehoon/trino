@@ -16,11 +16,11 @@ package io.trino.plugin.hive;
 import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import io.trino.plugin.hive.authentication.HiveIdentity;
 import io.trino.plugin.hive.metastore.SemiTransactionalHiveMetastore;
 import io.trino.plugin.hive.util.HiveBucketing.HiveBucketFilter;
-import io.trino.plugin.hive.util.Optionals;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
@@ -92,7 +92,7 @@ public class HivePartitionManager
 
         Optional<HiveBucketFilter> bucketFilter = getHiveBucketFilter(hiveTableHandle, effectivePredicate);
         TupleDomain<HiveColumnHandle> compactEffectivePredicate = effectivePredicate
-                .transform(HiveColumnHandle.class::cast)
+                .transformKeys(HiveColumnHandle.class::cast)
                 .simplify(domainCompactionThreshold);
 
         if (partitionColumns.isEmpty()) {
@@ -191,9 +191,11 @@ public class HivePartitionManager
                 partitions.getBucketFilter(),
                 handle.getAnalyzePartitionValues(),
                 handle.getAnalyzeColumnNames(),
-                Optionals.combine(handle.getConstraintColumns(), columns, Sets::union),
+                Sets.union(handle.getConstraintColumns(), columns.orElseGet(ImmutableSet::of)),
                 handle.getProjectedColumns(),
-                handle.getTransaction());
+                handle.getTransaction(),
+                handle.isRecordScannedFiles(),
+                handle.getMaxScannedFileSize());
     }
 
     public List<HivePartition> getOrLoadPartitions(SemiTransactionalHiveMetastore metastore, HiveIdentity identity, HiveTableHandle table)

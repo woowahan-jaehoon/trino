@@ -50,6 +50,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.Math.toIntExact;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -174,6 +175,12 @@ public class MongoMetadata
     }
 
     @Override
+    public void dropColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column)
+    {
+        mongoSession.dropColumn(((MongoTableHandle) tableHandle).getSchemaTableName(), ((MongoColumnHandle) column).getName());
+    }
+
+    @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorNewTableLayout> layout)
     {
         List<MongoColumnHandle> columns = buildColumnHandles(tableMetadata);
@@ -202,7 +209,10 @@ public class MongoMetadata
 
         return new MongoInsertTableHandle(
                 table.getSchemaTableName(),
-                columns.stream().filter(c -> !c.isHidden()).collect(toList()));
+                columns.stream()
+                        .filter(column -> !column.isHidden())
+                        .peek(column -> validateColumnNameForInsert(column.getName()))
+                        .collect(toImmutableList()));
     }
 
     @Override
@@ -268,7 +278,8 @@ public class MongoMetadata
 
         return Optional.of(new LimitApplicationResult<>(
                 new MongoTableHandle(handle.getSchemaTableName(), handle.getConstraint(), OptionalInt.of(toIntExact(limit))),
-                true));
+                true,
+                false));
     }
 
     @Override
@@ -287,7 +298,7 @@ public class MongoMetadata
                 newDomain,
                 handle.getLimit());
 
-        return Optional.of(new ConstraintApplicationResult<>(handle, constraint.getSummary()));
+        return Optional.of(new ConstraintApplicationResult<>(handle, constraint.getSummary(), false));
     }
 
     private void setRollback(Runnable action)
@@ -328,5 +339,12 @@ public class MongoMetadata
         return tableMetadata.getColumns().stream()
                 .map(m -> new MongoColumnHandle(m.getName(), m.getType(), m.isHidden()))
                 .collect(toList());
+    }
+
+    private static void validateColumnNameForInsert(String columnName)
+    {
+        if (columnName.contains("$") || columnName.contains(".")) {
+            throw new IllegalArgumentException("Column name must not contain '$' or '.' for INSERT: " + columnName);
+        }
     }
 }

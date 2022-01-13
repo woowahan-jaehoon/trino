@@ -15,7 +15,6 @@ package io.trino.sql.query;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.Session;
-import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.spi.type.SqlTime;
 import io.trino.spi.type.SqlTimeWithTimeZone;
@@ -39,20 +38,26 @@ import org.assertj.core.presentation.StandardRepresentation;
 import org.intellij.lang.annotations.Language;
 
 import java.io.Closeable;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.testing.Assertions.assertEqualsIgnoreOrder;
+import static io.trino.cost.StatsCalculator.noopStatsCalculator;
 import static io.trino.sql.planner.assertions.PlanAssert.assertPlan;
 import static io.trino.sql.query.QueryAssertions.ExpressionAssert.newExpressionAssert;
 import static io.trino.sql.query.QueryAssertions.QueryAssert.newQueryAssert;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.transaction.TransactionBuilder.transaction;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.fail;
@@ -93,12 +98,6 @@ public class QueryAssertions
     public AssertProvider<QueryAssert> query(@Language("SQL") String query)
     {
         return query(runner.getDefaultSession(), query);
-    }
-
-    @Deprecated
-    public AssertProvider<QueryAssert> query(@Language("SQL") String query, Session session)
-    {
-        return query(session, query);
     }
 
     public AssertProvider<QueryAssert> query(Session session, @Language("SQL") String query)
@@ -251,19 +250,52 @@ public class QueryAssertions
         private final String query;
         private boolean ordered;
         private boolean skipTypesCheck;
+        private boolean skipResultsCorrectnessCheckForPushdown;
 
         static AssertProvider<QueryAssert> newQueryAssert(String query, QueryRunner runner, Session session)
         {
             MaterializedResult result = runner.execute(session, query);
-            return () -> new QueryAssert(runner, session, query, result);
+            return () -> new QueryAssert(runner, session, query, result, false, false, false);
         }
 
-        public QueryAssert(QueryRunner runner, Session session, String query, MaterializedResult actual)
+        private QueryAssert(
+                QueryRunner runner,
+                Session session,
+                String query,
+                MaterializedResult actual,
+                boolean ordered,
+                boolean skipTypesCheck,
+                boolean skipResultsCorrectnessCheckForPushdown)
         {
             super(actual, Object.class);
             this.runner = requireNonNull(runner, "runner is null");
             this.session = requireNonNull(session, "session is null");
             this.query = requireNonNull(query, "query is null");
+            this.ordered = ordered;
+            this.skipTypesCheck = skipTypesCheck;
+            this.skipResultsCorrectnessCheckForPushdown = skipResultsCorrectnessCheckForPushdown;
+        }
+
+        public QueryAssert projected(int... columns)
+        {
+            return new QueryAssert(
+                    runner,
+                    session,
+                    format("%s projected with %s", query, Arrays.toString(columns)),
+                    new MaterializedResult(
+                            actual.getMaterializedRows().stream()
+                                    .map(row -> new MaterializedRow(
+                                            row.getPrecision(),
+                                            IntStream.of(columns)
+                                                    .mapToObj(row::getField)
+                                                    .collect(toList()))) // values are nullable
+                                    .collect(toImmutableList()),
+                            IntStream.of(columns)
+                                    .mapToObj(actual.getTypes()::get)
+                                    .collect(toImmutableList())),
+                    ordered,
+                    skipTypesCheck,
+                    skipResultsCorrectnessCheckForPushdown);
         }
 
         public QueryAssert matches(BiFunction<Session, QueryRunner, MaterializedResult> evaluator)
@@ -284,6 +316,12 @@ public class QueryAssertions
             return this;
         }
 
+        public QueryAssert skipResultsCorrectnessCheckForPushdown()
+        {
+            skipResultsCorrectnessCheckForPushdown = true;
+            return this;
+        }
+
         public QueryAssert matches(@Language("SQL") String query)
         {
             MaterializedResult expected = runner.execute(session, query);
@@ -294,11 +332,11 @@ public class QueryAssertions
         {
             return satisfies(actual -> {
                 if (!skipTypesCheck) {
-                    assertTypes(actual, expected.getTypes());
+                    assertTypes(query, actual, expected.getTypes());
                 }
 
                 ListAssert<MaterializedRow> assertion = assertThat(actual.getMaterializedRows())
-                        .as("Rows")
+                        .as("Rows for query [%s]", query)
                         .withRepresentation(ROWS_REPRESENTATION);
 
                 if (ordered) {
@@ -308,6 +346,21 @@ public class QueryAssertions
                     assertion.containsExactlyInAnyOrderElementsOf(expected.getMaterializedRows());
                 }
             });
+        }
+
+        public final QueryAssert matches(PlanMatchPattern expectedPlan)
+        {
+            transaction(runner.getTransactionManager(), runner.getAccessControl())
+                    .execute(session, session -> {
+                        Plan plan = runner.createPlan(session, query, WarningCollector.NOOP);
+                        assertPlan(
+                                session,
+                                runner.getMetadata(),
+                                noopStatsCalculator(),
+                                plan,
+                                expectedPlan);
+                    });
+            return this;
         }
 
         public QueryAssert containsAll(@Language("SQL") String query)
@@ -320,11 +373,11 @@ public class QueryAssertions
         {
             return satisfies(actual -> {
                 if (!skipTypesCheck) {
-                    assertTypes(actual, expected.getTypes());
+                    assertTypes(query, actual, expected.getTypes());
                 }
 
                 assertThat(actual.getMaterializedRows())
-                        .as("Rows")
+                        .as("Rows for query [%s]", query)
                         .withRepresentation(ROWS_REPRESENTATION)
                         .containsAll(expected.getMaterializedRows());
             });
@@ -333,7 +386,7 @@ public class QueryAssertions
         public QueryAssert hasOutputTypes(List<Type> expectedTypes)
         {
             return satisfies(actual -> {
-                assertTypes(actual, expectedTypes);
+                assertTypes(query, actual, expectedTypes);
             });
         }
 
@@ -341,22 +394,22 @@ public class QueryAssertions
         {
             return satisfies(actual -> {
                 assertThat(actual.getTypes())
-                        .as("Output types")
+                        .as("Output types for query [%s]", query)
                         .element(index).isEqualTo(expectedType);
             });
         }
 
-        private static void assertTypes(MaterializedResult actual, List<Type> expectedTypes)
+        private static void assertTypes(String query, MaterializedResult actual, List<Type> expectedTypes)
         {
             assertThat(actual.getTypes())
-                    .as("Output types")
+                    .as("Output types for query [%s]", query)
                     .isEqualTo(expectedTypes);
         }
 
         public QueryAssert returnsEmptyResult()
         {
             return satisfies(actual -> {
-                assertThat(actual.getRowCount()).as("row count").isEqualTo(0);
+                assertThat(actual.getMaterializedRows()).as("Rows for query [%s]", query).isEmpty();
             });
         }
 
@@ -365,10 +418,7 @@ public class QueryAssertions
          */
         public QueryAssert isFullyPushedDown()
         {
-            checkState(!(runner instanceof LocalQueryRunner), "testIsFullyPushedDown() currently does not work with LocalQueryRunner");
-
-            // Compare the results with pushdown disabled, so that explicit matches() call is not needed
-            verifyResultsWithPushdownDisabled();
+            checkState(!(runner instanceof LocalQueryRunner), "isFullyPushedDown() currently does not work with LocalQueryRunner");
 
             transaction(runner.getTransactionManager(), runner.getAccessControl())
                     .execute(session, session -> {
@@ -376,13 +426,17 @@ public class QueryAssertions
                         assertPlan(
                                 session,
                                 runner.getMetadata(),
-                                (node, sourceStats, lookup, ignore, types) -> PlanNodeStatsEstimate.unknown(),
+                                noopStatsCalculator(),
                                 plan,
                                 PlanMatchPattern.output(
                                         PlanMatchPattern.exchange(
                                                 PlanMatchPattern.node(TableScanNode.class))));
                     });
 
+            if (!skipResultsCorrectnessCheckForPushdown) {
+                // Compare the results with pushdown disabled, so that explicit matches() call is not needed
+                verifyResultsWithPushdownDisabled();
+            }
             return this;
         }
 
@@ -413,20 +467,21 @@ public class QueryAssertions
         {
             PlanMatchPattern expectedPlan = PlanMatchPattern.anyTree(retainedSubplan);
 
-            // Compare the results with pushdown disabled, so that explicit matches() call is not needed
-            verifyResultsWithPushdownDisabled();
-
             transaction(runner.getTransactionManager(), runner.getAccessControl())
                     .execute(session, session -> {
                         Plan plan = runner.createPlan(session, query, WarningCollector.NOOP);
                         assertPlan(
                                 session,
                                 runner.getMetadata(),
-                                (node, sourceStats, lookup, ignore, types) -> PlanNodeStatsEstimate.unknown(),
+                                noopStatsCalculator(),
                                 plan,
                                 expectedPlan);
                     });
 
+            if (!skipResultsCorrectnessCheckForPushdown) {
+                // Compare the results with pushdown disabled, so that explicit matches() call is not needed
+                verifyResultsWithPushdownDisabled();
+            }
             return this;
         }
 
@@ -456,7 +511,7 @@ public class QueryAssertions
                             timestamp.getEpochMicros(),
                             timestamp.getPicosOfMicros());
                 }
-                else if (object instanceof SqlTimestampWithTimeZone) {
+                if (object instanceof SqlTimestampWithTimeZone) {
                     SqlTimestampWithTimeZone timestamp = (SqlTimestampWithTimeZone) object;
                     return String.format(
                             "%s [p = %s, epochMillis = %s, fraction = %s, tz = %s]",
@@ -466,11 +521,11 @@ public class QueryAssertions
                             timestamp.getPicosOfMilli(),
                             timestamp.getTimeZoneKey());
                 }
-                else if (object instanceof SqlTime) {
+                if (object instanceof SqlTime) {
                     SqlTime time = (SqlTime) object;
                     return String.format("%s [picos = %s]", time, time.getPicos());
                 }
-                else if (object instanceof SqlTimeWithTimeZone) {
+                if (object instanceof SqlTimeWithTimeZone) {
                     SqlTimeWithTimeZone time = (SqlTimeWithTimeZone) object;
                     return String.format(
                             "%s [picos = %s, offset = %s]",

@@ -6,6 +6,15 @@ The Oracle connector allows querying and creating tables in an external Oracle
 database. Connectors let Trino join data provided by different databases,
 like Oracle and Hive, or different Oracle database instances.
 
+Requirements
+------------
+
+To connect to Oracle, you need:
+
+* Oracle 12 or higher.
+* Network access from the Trino coordinator and workers to Oracle.
+  Port 1521 is the default port.
+
 Configuration
 -------------
 
@@ -16,13 +25,27 @@ properties in the file:
 .. code-block:: text
 
     connector.name=oracle
-    connection-url=jdbc:oracle:thin:@example.net:1521/ORCLCDB
+    // The exact format of connection-url varies by Oracle version. Refer to
+    // the Oracle Database documentation for version-specific information on the
+    // JDBC Thin driver.
+    connection-url=jdbc:oracle:thin:@//example.net:1521/ORCLCDB
     connection-user=root
     connection-password=secret
 
+The ``connection-url`` defines the connection information and parameters to pass
+to the Oracle JDBC Thin driver. See the `Oracle Database JDBC driver
+documentation <https://docs.oracle.com/cd/B28359_01/java.111/b31224/urls.htm#BEIDHCBA>`_
+for more information.
+
+The ``connection-user`` and ``connection-password`` are typically required and
+determine the user credentials for the connection, often a service user. You can
+use :doc:`secrets </security/secrets>` to avoid actual values in the catalog
+properties files.
+
 .. note::
     Oracle does not expose metadata comment via ``REMARKS`` column by default
-    in JDBC driver. You can enable it using ``oracle.remarks-reporting.enabled`` config option. See `Additional Oracle Performance Extensions
+    in JDBC driver. You can enable it using ``oracle.remarks-reporting.enabled``
+    config option. See `Additional Oracle Performance Extensions
     <https://docs.oracle.com/en/database/oracle/oracle-database/19/jjdbc/performance-extensions.html#GUID-96A38C6D-A288-4E0B-9F03-E711C146632B>`_
     for more details.
 
@@ -50,7 +73,15 @@ the Oracle connector as a separate catalog.
 
 To add another Oracle catalog, create a new properties file. For example, if
 you name the property file ``sales.properties``, Trino creates a catalog named
-sales.
+``sales``.
+
+.. include:: jdbc-common-configurations.fragment
+
+.. include:: jdbc-procedures.fragment
+
+.. include:: jdbc-case-insensitive-matching.fragment
+
+.. include:: non-transactional-insert.fragment
 
 Querying Oracle
 ---------------
@@ -87,8 +118,10 @@ To access the clicks table in the web database, run the following::
 
     SELECT * FROM oracle.web.clicks;
 
-Mapping data types between Trino and Oracle
---------------------------------------------
+.. _oracle-type-mapping:
+
+Type mapping
+------------
 
 Both Oracle and Trino have types that are not supported by the Oracle
 connector. The following sections explain their type mapping.
@@ -158,17 +191,6 @@ Trino data type mapping:
   * - ``TIMESTAMP(p) WITH TIME ZONE``
     - ``TIMESTAMP WITH TIME ZONE``
     - See :ref:`datetime mapping`
-
-If an Oracle table uses a type not listed in the above table, then you can use the
-``unsupported-type-handling`` configuration property to specify Trino behavior.
-For example:
-
-- If ``unsupported-type-handling`` is set to ``FAIL``, then the
-  querying of an unsupported table fails.
-- If ``unsupported-type-handling`` is set to ``IGNORE``,
-  then you can't see the unsupported types in Trino.
-- If ``unsupported-type-handling`` is set to ``CONVERT_TO_VARCHAR``,
-  then the column is exposed as unbounded ``VARCHAR``.
 
 Trino to Oracle type mapping
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -274,8 +296,8 @@ to Trino ``TIMESTAMP``.
 Mapping character types
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-Trino's ``VARCHAR(n)`` maps to ``VARCHAR2(n CHAR)`` if ``n`` is no greater than
-4000. A larger or unbounded ``VARCHAR`` maps to ``NCLOB``.
+Trino's ``VARCHAR(n)`` maps to ``VARCHAR2(n CHAR)`` if ``n`` is no greater
+than 4000. A larger or unbounded ``VARCHAR`` maps to ``NCLOB``.
 
 Trino's ``CHAR(n)`` maps to ``CHAR(n CHAR)`` if ``n`` is no greater than 2000.
 A larger ``CHAR`` maps to ``NCLOB``.
@@ -300,10 +322,12 @@ example::
 Attempting to write a ``CHAR`` that doesn't fit in the column's actual size
 fails. This is also true for the equivalent ``VARCHAR`` types.
 
-Type mapping configuration properties
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. include:: jdbc-type-mapping.fragment
 
-.. list-table:: Type Mapping Properties
+Number to decimal configuration properties
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
   :widths: 20, 20, 50, 10
   :header-rows: 1
 
@@ -311,14 +335,6 @@ Type mapping configuration properties
     - Session property name
     - Description
     - Default
-  * - ``unsupported-type-handling``
-    - ``unsupported_type_handling``
-    - Configures how unsupported column data types are handled:
-
-      - ``IGNORE`` - column is not accessible.
-      - ``CONVERT_TO_VARCHAR`` - column is converted to unbounded ``VARCHAR``.
-
-    - ``IGNORE``
   * - ``oracle.number.default-scale``
     - ``number_default_scale``
     - Default Trino ``DECIMAL`` scale for Oracle ``NUMBER`` (without precision
@@ -363,20 +379,81 @@ include ``SYNONYM``, add the following configuration property:
 
     oracle.synonyms.enabled=true
 
+.. _oracle-pushdown:
+
 Pushdown
 --------
 
-The connector supports :doc:`pushdown </optimizer/pushdown>` for optimized query processing.
+The connector supports pushdown for a number of operations:
 
-Limitations
+* :ref:`join-pushdown`
+* :ref:`limit-pushdown`
+* :ref:`topn-pushdown`
+
+.. _oracle-predicate-pushdown:
+
+Predicate pushdown support
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The connector does not support pushdown of any predicates on columns that use
+the ``CLOB``, ``NCLOB``, ``BLOB``, or ``RAW(n)`` Oracle database types, or Trino
+data types that :ref:`map to these Oracle database types <oracle-type-mapping>`.
+
+In the following example, the predicate is not pushed down for either query
+since ``name`` is a column of type ``VARCHAR``, which maps to ``NCLOB`` in
+Oracle:
+
+.. code-block:: sql
+
+    SHOW CREATE TABLE nation;
+
+    --             Create Table
+    ----------------------------------------
+    -- CREATE TABLE oracle.trino_test.nation (
+    --    name varchar
+    -- )
+    -- (1 row)
+
+    SELECT * FROM nation WHERE name > 'CANADA';
+    SELECT * FROM nation WHERE name = 'CANADA';
+
+In the following example, the predicate is pushed down for both queries
+since ``name`` is a column of type ``VARCHAR(25)``, which maps to
+``VARCHAR2(25)`` in Oracle:
+
+.. code-block:: sql
+
+    SHOW CREATE TABLE nation;
+
+    --             Create Table
+    ----------------------------------------
+    -- CREATE TABLE oracle.trino_test.nation (
+    --    name varchar(25)
+    -- )
+    -- (1 row)
+
+    SELECT * FROM nation WHERE name > 'CANADA';
+    SELECT * FROM nation WHERE name = 'CANADA';
+
+.. _oracle-sql-support:
+
+SQL support
 -----------
 
-The following SQL statements are not supported:
+The connector provides read access and write access to data and metadata in
+Oracle. In addition to the :ref:`globally available <sql-globally-available>`
+and :ref:`read operation <sql-read-operations>` statements, the connector
+supports the following statements:
 
+* :doc:`/sql/insert`
 * :doc:`/sql/delete`
+* :doc:`/sql/truncate`
+* :doc:`/sql/create-table`
+* :doc:`/sql/create-table-as`
+* :doc:`/sql/drop-table`
 * :doc:`/sql/alter-table`
-* :doc:`/sql/grant`
-* :doc:`/sql/revoke`
-* :doc:`/sql/show-grants`
-* :doc:`/sql/show-roles`
-* :doc:`/sql/show-role-grants`
+* :doc:`/sql/comment`
+
+.. include:: sql-delete-limitation.fragment
+
+.. include:: alter-table-limitation.fragment

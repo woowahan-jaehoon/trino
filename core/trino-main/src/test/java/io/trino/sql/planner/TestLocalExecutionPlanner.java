@@ -46,9 +46,9 @@ public class TestLocalExecutionPlanner
     public void testProjectionCompilerFailure()
     {
         String inner = "(" + Joiner.on(" + ").join(nCopies(100, "rand()")) + ")";
-        String outer = Joiner.on(" + ").join(nCopies(100, inner));
+        String outer = "x + x + " + Joiner.on(" + ").join(nCopies(100, inner));
 
-        assertTrinoExceptionThrownBy(() -> runner.execute("SELECT " + outer))
+        assertTrinoExceptionThrownBy(() -> runner.execute("SELECT " + outer + " FROM (VALUES rand()) t(x)"))
                 .hasErrorCode(COMPILER_ERROR)
                 .hasMessageStartingWith("Query exceeded maximum columns");
     }
@@ -58,9 +58,9 @@ public class TestLocalExecutionPlanner
     {
         // Filter Query
         String filterQueryInner = "FROM (SELECT rand() as c1, rand() as c2, rand() as c3)";
-        String filterQueryWhere = "WHERE c1 = rand() OR " + Joiner.on(" AND ").join(nCopies(250, "c1 = rand()"))
-                + " OR " + Joiner.on(" AND ").join(nCopies(200, " c2 = rand()"))
-                + " OR " + Joiner.on(" AND ").join(nCopies(200, " c3 = rand()"));
+        String filterQueryWhere = "WHERE c1 = rand() OR " + Joiner.on(" AND ").join(nCopies(1000, "c1 = rand()"))
+                + " OR " + Joiner.on(" AND ").join(nCopies(1000, " c2 = rand()"))
+                + " OR " + Joiner.on(" AND ").join(nCopies(1000, " c3 = rand()"));
 
         assertTrinoExceptionThrownBy(() -> runner.execute("SELECT * " + filterQueryInner + filterQueryWhere))
                 .hasErrorCode(COMPILER_ERROR)

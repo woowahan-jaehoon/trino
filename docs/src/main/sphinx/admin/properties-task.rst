@@ -5,8 +5,8 @@ Task properties
 ``task.concurrency``
 ^^^^^^^^^^^^^^^^^^^^
 
-* **Type:** ``integer``
-* **Restrictions:** must be a power of two
+* **Type:** :ref:`prop-type-integer`
+* **Restrictions:** Must be a power of two
 * **Default value:** ``16``
 
 Default local concurrency for parallel operators, such as joins and aggregations.
@@ -21,7 +21,7 @@ using the ``task_concurrency`` session property.
 ``task.http-response-threads``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* **Type:** ``integer``
+* **Type:** :ref:`prop-type-integer`
 * **Minimum value:** ``1``
 * **Default value:** ``100``
 
@@ -34,7 +34,7 @@ or thousands of workers.
 ``task.http-timeout-threads``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* **Type:** ``integer``
+* **Type:** :ref:`prop-type-integer`
 * **Minimum value:** ``1``
 * **Default value:** ``3``
 
@@ -47,7 +47,7 @@ number of threads.
 ``task.info-update-interval``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* **Type:** ``duration``
+* **Type:** :ref:`prop-type-duration`
 * **Minimum value:** ``1ms``
 * **Maximum value:** ``10s``
 * **Default value:** ``3s``
@@ -55,10 +55,21 @@ number of threads.
 Controls staleness of task information, which is used in scheduling. Larger values
 can reduce coordinator CPU load, but may result in suboptimal split scheduling.
 
+``task.max-drivers-per-task``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** :ref:`prop-type-integer`
+* **Minimum value:** ``1``
+* **Default Value:** ``2147483647``
+
+Controls the maximum number of drivers a task runs concurrently. Setting this value
+reduces the likelihood that a task uses too many drivers and can improve concurrent query
+performance. This can lead to resource waste if it runs too few concurrent queries.
+
 ``task.max-partial-aggregation-memory``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* **Type:** ``data size``
+* **Type:** :ref:`prop-type-data-size`
 * **Default value:** ``16MB``
 
 Maximum size of partial aggregation results for distributed aggregations. Increasing this
@@ -68,8 +79,8 @@ groups to be kept locally before being flushed, at the cost of additional memory
 ``task.max-worker-threads``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* **Type:** ``integer``
-* **Default value:** ``Node CPUs * 2``
+* **Type:** :ref:`prop-type-integer`
+* **Default value:** (Node CPUs * 2)
 
 Sets the number of threads used by workers to process splits. Increasing this number
 can improve throughput, if worker CPU utilization is low and all the threads are in use,
@@ -81,8 +92,8 @@ via the ``RunningSplits`` property of the
 ``task.min-drivers``
 ^^^^^^^^^^^^^^^^^^^^
 
-* **Type:** ``integer``
-* **Default value:** ``task.max-worker-threads * 2``
+* **Type:** :ref:`prop-type-integer`
+* **Default value:** (``task.max-worker-threads`` * 2)
 
 The target number of running leaf splits on a worker. This is a minimum value because
 each leaf task is guaranteed at least ``3`` running splits. Non-leaf tasks are also
@@ -90,11 +101,21 @@ guaranteed to run in order to prevent deadlocks. A lower value may improve respo
 for new tasks, but can result in underutilized resources. A higher value can increase
 resource utilization, but uses additional memory.
 
+``task.min-drivers-per-task``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** :ref:`prop-type-integer`
+* **Minimum value:** ``1``
+* **Default Value:** ``3``
+
+The minimum number of drivers guaranteed to run concurrently for a single task given
+the task has remaining splits to process.
+
 ``task.writer-count``
 ^^^^^^^^^^^^^^^^^^^^^
 
-* **Type:** ``integer``
-* **Restrictions:** must be a power of two
+* **Type:** :ref:`prop-type-integer`
+* **Restrictions:** Must be a power of two
 * **Default value:** ``1``
 
 The number of concurrent writer threads per worker per query. Increasing this value may

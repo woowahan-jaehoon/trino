@@ -16,6 +16,7 @@ package io.trino.sql.planner.planprinter;
 import com.google.common.base.CaseFormat;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Streams;
 import io.airlift.units.Duration;
@@ -24,6 +25,7 @@ import io.trino.cost.PlanCostEstimate;
 import io.trino.cost.PlanNodeStatsAndCostSummary;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.cost.StatsAndCosts;
+import io.trino.execution.QueryStats;
 import io.trino.execution.StageInfo;
 import io.trino.execution.StageStats;
 import io.trino.execution.TableInfo;
@@ -71,11 +73,14 @@ import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.MarkDistinctNode;
 import io.trino.sql.planner.plan.OffsetNode;
 import io.trino.sql.planner.plan.OutputNode;
+import io.trino.sql.planner.plan.PatternRecognitionNode;
+import io.trino.sql.planner.plan.PatternRecognitionNode.Measure;
 import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.PlanVisitor;
 import io.trino.sql.planner.plan.ProjectNode;
+import io.trino.sql.planner.plan.RefreshMaterializedViewNode;
 import io.trino.sql.planner.plan.RemoteSourceNode;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.SampleNode;
@@ -86,6 +91,7 @@ import io.trino.sql.planner.plan.StatisticAggregations;
 import io.trino.sql.planner.plan.StatisticAggregationsDescriptor;
 import io.trino.sql.planner.plan.StatisticsWriterNode;
 import io.trino.sql.planner.plan.TableDeleteNode;
+import io.trino.sql.planner.plan.TableExecuteNode;
 import io.trino.sql.planner.plan.TableFinishNode;
 import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.TableWriterNode;
@@ -97,15 +103,22 @@ import io.trino.sql.planner.plan.UpdateNode;
 import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
 import io.trino.sql.planner.planprinter.NodeRepresentation.TypedSymbol;
+import io.trino.sql.planner.rowpattern.AggregationValuePointer;
+import io.trino.sql.planner.rowpattern.LogicalIndexExtractor.ExpressionAndValuePointers;
+import io.trino.sql.planner.rowpattern.LogicalIndexPointer;
+import io.trino.sql.planner.rowpattern.ScalarValuePointer;
+import io.trino.sql.planner.rowpattern.ValuePointer;
+import io.trino.sql.planner.rowpattern.ir.IrLabel;
 import io.trino.sql.tree.ComparisonExpression;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.ExpressionRewriter;
 import io.trino.sql.tree.ExpressionTreeRewriter;
 import io.trino.sql.tree.FunctionCall;
+import io.trino.sql.tree.PatternRecognitionRelation.RowsPerMatch;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Row;
+import io.trino.sql.tree.SkipTo.Position;
 import io.trino.sql.tree.SymbolReference;
-import io.trino.util.GraphvizPrinter;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -129,6 +142,7 @@ import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.execution.StageInfo.getAllStages;
 import static io.trino.metadata.ResolvedFunction.extractFunctionName;
 import static io.trino.operator.StageExecutionDescriptor.ungroupedExecution;
+import static io.trino.server.DynamicFilterService.DynamicFilterDomainStats;
 import static io.trino.sql.DynamicFilters.extractDynamicFilters;
 import static io.trino.sql.ExpressionUtils.combineConjunctsWithDuplicates;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
@@ -138,10 +152,13 @@ import static io.trino.sql.planner.planprinter.TextRenderer.formatDouble;
 import static io.trino.sql.planner.planprinter.TextRenderer.formatPositions;
 import static io.trino.sql.planner.planprinter.TextRenderer.indentString;
 import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.sql.tree.PatternRecognitionRelation.RowsPerMatch.WINDOW;
+import static java.lang.Math.abs;
 import static java.lang.String.format;
 import static java.util.Arrays.stream;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 
@@ -149,6 +166,7 @@ public class PlanPrinter
 {
     private final PlanRepresentation representation;
     private final Function<TableScanNode, TableInfo> tableInfoSupplier;
+    private final Map<DynamicFilterId, DynamicFilterDomainStats> dynamicFilterDomainStats;
     private final ValuePrinter valuePrinter;
 
     // NOTE: do NOT add Metadata or Session to this class.  The plan printer must be usable outside of a transaction.
@@ -157,6 +175,7 @@ public class PlanPrinter
             TypeProvider types,
             Optional<StageExecutionDescriptor> stageExecutionStrategy,
             Function<TableScanNode, TableInfo> tableInfoSupplier,
+            Map<DynamicFilterId, DynamicFilterDomainStats> dynamicFilterDomainStats,
             ValuePrinter valuePrinter,
             StatsAndCosts estimatedStatsAndCosts,
             Optional<Map<PlanNodeId, PlanNodeStats>> stats)
@@ -164,11 +183,13 @@ public class PlanPrinter
         requireNonNull(planRoot, "planRoot is null");
         requireNonNull(types, "types is null");
         requireNonNull(tableInfoSupplier, "tableInfoSupplier is null");
+        requireNonNull(dynamicFilterDomainStats, "dynamicFilterDomainStats is null");
         requireNonNull(valuePrinter, "valuePrinter is null");
         requireNonNull(estimatedStatsAndCosts, "estimatedStatsAndCosts is null");
         requireNonNull(stats, "stats is null");
 
         this.tableInfoSupplier = tableInfoSupplier;
+        this.dynamicFilterDomainStats = ImmutableMap.copyOf(dynamicFilterDomainStats);
         this.valuePrinter = valuePrinter;
 
         Optional<Duration> totalScheduledTime = stats.map(s -> new Duration(s.values().stream()
@@ -203,7 +224,7 @@ public class PlanPrinter
 
         TableInfoSupplier tableInfoSupplier = new TableInfoSupplier(metadata, session);
         ValuePrinter valuePrinter = new ValuePrinter(metadata, session);
-        return new PlanPrinter(root, typeProvider, Optional.empty(), tableInfoSupplier, valuePrinter, StatsAndCosts.empty(), Optional.empty()).toJson();
+        return new PlanPrinter(root, typeProvider, Optional.empty(), tableInfoSupplier, ImmutableMap.of(), valuePrinter, StatsAndCosts.empty(), Optional.empty()).toJson();
     }
 
     public static String textLogicalPlan(
@@ -217,18 +238,28 @@ public class PlanPrinter
     {
         TableInfoSupplier tableInfoSupplier = new TableInfoSupplier(metadata, session);
         ValuePrinter valuePrinter = new ValuePrinter(metadata, session);
-        return new PlanPrinter(plan, types, Optional.empty(), tableInfoSupplier, valuePrinter, estimatedStatsAndCosts, Optional.empty()).toText(verbose, level);
+        return new PlanPrinter(plan, types, Optional.empty(), tableInfoSupplier, ImmutableMap.of(), valuePrinter, estimatedStatsAndCosts, Optional.empty()).toText(verbose, level);
     }
 
-    public static String textDistributedPlan(StageInfo outputStageInfo, Metadata metadata, Session session, boolean verbose)
+    public static String textDistributedPlan(
+            StageInfo outputStageInfo,
+            QueryStats queryStats,
+            Metadata metadata,
+            Session session,
+            boolean verbose)
     {
         return textDistributedPlan(
                 outputStageInfo,
+                queryStats,
                 new ValuePrinter(metadata, session),
                 verbose);
     }
 
-    public static String textDistributedPlan(StageInfo outputStageInfo, ValuePrinter valuePrinter, boolean verbose)
+    public static String textDistributedPlan(
+            StageInfo outputStageInfo,
+            QueryStats queryStats,
+            ValuePrinter valuePrinter,
+            boolean verbose)
     {
         Map<PlanNodeId, TableInfo> tableInfos = getAllStages(Optional.of(outputStageInfo)).stream()
                 .map(StageInfo::getTables)
@@ -242,15 +273,22 @@ public class PlanPrinter
                 .map(StageInfo::getPlan)
                 .collect(toImmutableList());
         Map<PlanNodeId, PlanNodeStats> aggregatedStats = aggregateStageStats(allStages);
+
+        Map<DynamicFilterId, DynamicFilterDomainStats> dynamicFilterDomainStats = queryStats.getDynamicFiltersStats()
+                .getDynamicFilterDomainStats().stream()
+                .collect(toImmutableMap(DynamicFilterDomainStats::getDynamicFilterId, identity()));
+        TypeProvider typeProvider = getTypeProvider(allFragments);
+
         for (StageInfo stageInfo : allStages) {
             builder.append(formatFragment(
                     tableScanNode -> tableInfos.get(tableScanNode.getId()),
+                    dynamicFilterDomainStats,
                     valuePrinter,
                     stageInfo.getPlan(),
                     Optional.of(stageInfo),
                     Optional.of(aggregatedStats),
                     verbose,
-                    allFragments));
+                    typeProvider));
         }
 
         return builder.toString();
@@ -261,8 +299,9 @@ public class PlanPrinter
         TableInfoSupplier tableInfoSupplier = new TableInfoSupplier(metadata, session);
         ValuePrinter valuePrinter = new ValuePrinter(metadata, session);
         StringBuilder builder = new StringBuilder();
+        TypeProvider typeProvider = getTypeProvider(plan.getAllFragments());
         for (PlanFragment fragment : plan.getAllFragments()) {
-            builder.append(formatFragment(tableInfoSupplier, valuePrinter, fragment, Optional.empty(), Optional.empty(), verbose, plan.getAllFragments()));
+            builder.append(formatFragment(tableInfoSupplier, ImmutableMap.of(), valuePrinter, fragment, Optional.empty(), Optional.empty(), verbose, typeProvider));
         }
 
         return builder.toString();
@@ -270,12 +309,13 @@ public class PlanPrinter
 
     private static String formatFragment(
             Function<TableScanNode, TableInfo> tableInfoSupplier,
+            Map<DynamicFilterId, DynamicFilterDomainStats> dynamicFilterDomainStats,
             ValuePrinter valuePrinter,
             PlanFragment fragment,
             Optional<StageInfo> stageInfo,
             Optional<Map<PlanNodeId, PlanNodeStats>> planNodeStats,
             boolean verbose,
-            List<PlanFragment> allFragments)
+            TypeProvider typeProvider)
     {
         StringBuilder builder = new StringBuilder();
         builder.append(format("Fragment %s [%s]\n",
@@ -332,22 +372,27 @@ public class PlanPrinter
         }
         builder.append(indentString(1)).append(format("Stage Execution Strategy: %s\n", fragment.getStageExecutionDescriptor().getStageExecutionStrategy()));
 
-        TypeProvider typeProvider = TypeProvider.copyOf(allFragments.stream()
-                .flatMap(f -> f.getSymbols().entrySet().stream())
-                .distinct()
-                .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue)));
         builder.append(
                 new PlanPrinter(
                         fragment.getRoot(),
                         typeProvider,
                         Optional.of(fragment.getStageExecutionDescriptor()),
                         tableInfoSupplier,
+                        dynamicFilterDomainStats,
                         valuePrinter,
                         fragment.getStatsAndCosts(),
                         planNodeStats).toText(verbose, 1))
                 .append("\n");
 
         return builder.toString();
+    }
+
+    private static TypeProvider getTypeProvider(List<PlanFragment> fragments)
+    {
+        return TypeProvider.copyOf(fragments.stream()
+                .flatMap(f -> f.getSymbols().entrySet().stream())
+                .distinct()
+                .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue)));
     }
 
     public static String graphvizLogicalPlan(PlanNode plan, TypeProvider types)
@@ -507,9 +552,16 @@ public class PlanPrinter
         @Override
         public Void visitLimit(LimitNode node, Void context)
         {
+            String presSortedInputs = node.getPreSortedInputs().stream()
+                    .map(Symbol::getName)
+                    .collect(joining(", ", ", input pre-sorted by (", ")"));
             addNode(node,
                     format("Limit%s", node.isPartial() ? "Partial" : ""),
-                    format("[%s%s]", node.getCount(), node.isWithTies() ? "+ties" : ""));
+                    format(
+                            "[%s%s%s]",
+                            node.getCount(),
+                            node.isWithTies() ? "+ties" : "",
+                            node.requiresPreSortedInputs() ? presSortedInputs : ""));
             return processChildren(node, context);
         }
 
@@ -527,7 +579,7 @@ public class PlanPrinter
         {
             String type = "";
             if (node.getStep() != AggregationNode.Step.SINGLE) {
-                type = format("(%s)", node.getStep().toString());
+                type = format("(%s)", node.getStep());
             }
             if (node.isStreamable()) {
                 type = format("%s(STREAMING)", type);
@@ -631,6 +683,175 @@ public class PlanPrinter
                         frameInfo);
             }
             return processChildren(node, context);
+        }
+
+        @Override
+        public Void visitPatternRecognition(PatternRecognitionNode node, Void context)
+        {
+            List<String> partitionBy = node.getPartitionBy().stream()
+                    .map(Objects::toString)
+                    .collect(toImmutableList());
+
+            List<String> args = new ArrayList<>();
+            if (!partitionBy.isEmpty()) {
+                List<Symbol> prePartitioned = node.getPartitionBy().stream()
+                        .filter(node.getPrePartitionedInputs()::contains)
+                        .collect(toImmutableList());
+
+                List<Symbol> notPrePartitioned = node.getPartitionBy().stream()
+                        .filter(column -> !node.getPrePartitionedInputs().contains(column))
+                        .collect(toImmutableList());
+
+                StringBuilder builder = new StringBuilder();
+                if (!prePartitioned.isEmpty()) {
+                    builder.append("<")
+                            .append(Joiner.on(", ").join(prePartitioned))
+                            .append(">");
+                    if (!notPrePartitioned.isEmpty()) {
+                        builder.append(", ");
+                    }
+                }
+                if (!notPrePartitioned.isEmpty()) {
+                    builder.append(Joiner.on(", ").join(notPrePartitioned));
+                }
+                args.add(format("partition by (%s)", builder));
+            }
+            if (node.getOrderingScheme().isPresent()) {
+                OrderingScheme orderingScheme = node.getOrderingScheme().get();
+                args.add(format("order by (%s)", Stream.concat(
+                        orderingScheme.getOrderBy().stream()
+                                .limit(node.getPreSortedOrderPrefix())
+                                .map(symbol -> "<" + symbol + " " + orderingScheme.getOrdering(symbol) + ">"),
+                        orderingScheme.getOrderBy().stream()
+                                .skip(node.getPreSortedOrderPrefix())
+                                .map(symbol -> symbol + " " + orderingScheme.getOrdering(symbol)))
+                        .collect(Collectors.joining(", "))));
+            }
+
+            NodeRepresentation nodeOutput = addNode(node, "PatterRecognition", format("[%s]%s", Joiner.on(", ").join(args), formatHash(node.getHashSymbol())));
+
+            if (node.getCommonBaseFrame().isPresent()) {
+                nodeOutput.appendDetailsLine("base frame: " + formatFrame(node.getCommonBaseFrame().get()));
+            }
+            for (Map.Entry<Symbol, WindowNode.Function> entry : node.getWindowFunctions().entrySet()) {
+                WindowNode.Function function = entry.getValue();
+                nodeOutput.appendDetailsLine("%s := %s(%s)", entry.getKey(), function.getResolvedFunction().getSignature().getName(), Joiner.on(", ").join(function.getArguments()));
+            }
+
+            for (Map.Entry<Symbol, Measure> entry : node.getMeasures().entrySet()) {
+                nodeOutput.appendDetailsLine("%s := %s", entry.getKey(), unresolveFunctions(entry.getValue().getExpressionAndValuePointers().getExpression()));
+                appendValuePointers(nodeOutput, entry.getValue().getExpressionAndValuePointers());
+            }
+            if (node.getRowsPerMatch() != WINDOW) {
+                nodeOutput.appendDetailsLine(formatRowsPerMatch(node.getRowsPerMatch()));
+            }
+            nodeOutput.appendDetailsLine(formatSkipTo(node.getSkipToPosition(), node.getSkipToLabel()));
+            nodeOutput.appendDetailsLine(format("pattern[%s] (%s)", node.getPattern(), node.isInitial() ? "INITIAL" : "SEEK"));
+            nodeOutput.appendDetailsLine(format("subsets[%s]", node.getSubsets().entrySet().stream()
+                    .map(subset -> subset.getKey().getName() +
+                            " := " +
+                            subset.getValue().stream()
+                                    .map(IrLabel::getName)
+                                    .collect(Collectors.joining(", ", "{", "}")))
+                    .collect(joining(", "))));
+            for (Map.Entry<IrLabel, ExpressionAndValuePointers> entry : node.getVariableDefinitions().entrySet()) {
+                nodeOutput.appendDetailsLine("%s := %s", entry.getKey().getName(), unresolveFunctions(entry.getValue().getExpression()));
+                appendValuePointers(nodeOutput, entry.getValue());
+            }
+
+            return processChildren(node, context);
+        }
+
+        private void appendValuePointers(NodeRepresentation nodeOutput, ExpressionAndValuePointers expressionAndPointers)
+        {
+            for (int i = 0; i < expressionAndPointers.getLayout().size(); i++) {
+                Symbol symbol = expressionAndPointers.getLayout().get(i);
+                if (expressionAndPointers.getMatchNumberSymbols().contains(symbol)) {
+                    // match_number does not use the value pointer. It is constant per match.
+                    continue;
+                }
+                ValuePointer pointer = expressionAndPointers.getValuePointers().get(i);
+
+                if (pointer instanceof ScalarValuePointer) {
+                    ScalarValuePointer scalarPointer = (ScalarValuePointer) pointer;
+                    String sourceSymbolName = expressionAndPointers.getClassifierSymbols().contains(symbol) ? "classifier" : scalarPointer.getInputSymbol().getName();
+                    nodeOutput.appendDetailsLine(indentString(1) + symbol + " := " + sourceSymbolName + "[" + formatLogicalIndexPointer(scalarPointer.getLogicalIndexPointer()) + "]");
+                }
+                else if (pointer instanceof AggregationValuePointer) {
+                    AggregationValuePointer aggregationPointer = (AggregationValuePointer) pointer;
+                    String processingMode = aggregationPointer.getSetDescriptor().isRunning() ? "RUNNING " : "FINAL ";
+                    String name = aggregationPointer.getFunction().getSignature().getName();
+                    String arguments = Joiner.on(", ").join(aggregationPointer.getArguments());
+                    String labels = aggregationPointer.getSetDescriptor().getLabels().stream()
+                            .map(IrLabel::getName)
+                            .collect(joining(", ", "{", "}"));
+                    nodeOutput.appendDetailsLine(indentString(1) + symbol + " := " + processingMode + name + "(" + arguments + ")" + labels);
+                }
+                else {
+                    throw new UnsupportedOperationException("unexpected ValuePointer type: " + pointer.getClass().getSimpleName());
+                }
+            }
+        }
+
+        private String formatLogicalIndexPointer(LogicalIndexPointer pointer)
+        {
+            StringBuilder builder = new StringBuilder();
+            int physicalOffset = pointer.getPhysicalOffset();
+            if (physicalOffset > 0) {
+                builder.append("NEXT(");
+            }
+            else if (physicalOffset < 0) {
+                builder.append("PREV(");
+            }
+            builder.append(pointer.isRunning() ? "RUNNING " : "FINAL ");
+            builder.append(pointer.isLast() ? "LAST(" : "FIRST(");
+            builder.append(pointer.getLabels().stream()
+                    .map(IrLabel::getName)
+                    .collect(joining(", ", "{", "}")));
+            if (pointer.getLogicalOffset() > 0) {
+                builder
+                        .append(", ")
+                        .append(pointer.getLogicalOffset());
+            }
+            builder.append(")");
+            if (physicalOffset != 0) {
+                builder
+                        .append(", ")
+                        .append(abs(physicalOffset))
+                        .append(")");
+            }
+            return builder.toString();
+        }
+
+        private String formatRowsPerMatch(RowsPerMatch rowsPerMatch)
+        {
+            switch (rowsPerMatch) {
+                case ONE:
+                    return "ONE ROW PER MATCH";
+                case ALL_SHOW_EMPTY:
+                    return "ALL ROWS PER MATCH SHOW EMPTY MATCHES";
+                case ALL_OMIT_EMPTY:
+                    return "ALL ROWS PER MATCH OMIT EMPTY MATCHES";
+                case ALL_WITH_UNMATCHED:
+                    return "ALL ROWS PER MATCH WITH UNMATCHED ROWS";
+                default:
+                    throw new IllegalArgumentException("unexpected rowsPer match value: " + rowsPerMatch.name());
+            }
+        }
+
+        private String formatSkipTo(Position position, Optional<IrLabel> label)
+        {
+            switch (position) {
+                case PAST_LAST:
+                    return "AFTER MATCH SKIP PAST LAST ROW";
+                case NEXT:
+                    return "AFTER MATCH SKIP TO NEXT ROW";
+                case FIRST:
+                    return "AFTER MATCH SKIP TO FIRST " + label.get().getName();
+                case LAST:
+                    return "AFTER MATCH SKIP TO LAST " + label.get().getName();
+            }
+            throw new UnsupportedOperationException("unsupported SKIP TO option");
         }
 
         @Override
@@ -780,6 +1001,7 @@ public class PlanPrinter
                 }
             }
 
+            List<DynamicFilters.Descriptor> dynamicFilters = ImmutableList.of();
             if (filterNode.isPresent()) {
                 operatorName += "Filter";
                 formatString += "filterPredicate = %s, ";
@@ -787,8 +1009,9 @@ public class PlanPrinter
                 DynamicFilters.ExtractResult extractResult = extractDynamicFilters(predicate);
                 arguments.add(unresolveFunctions(combineConjunctsWithDuplicates(extractResult.getStaticConjuncts())));
                 if (!extractResult.getDynamicConjuncts().isEmpty()) {
-                    formatString += "dynamicFilter = %s, ";
-                    arguments.add(printDynamicFilters(extractResult.getDynamicConjuncts()));
+                    formatString += "dynamicFilters = %s, ";
+                    dynamicFilters = extractResult.getDynamicConjuncts();
+                    arguments.add(printDynamicFilters(dynamicFilters));
                 }
             }
 
@@ -826,6 +1049,19 @@ public class PlanPrinter
                     nodeOutput.appendDetails("Input: %s (%s)", formatPositions(nodeStats.getPlanNodeInputPositions()), nodeStats.getPlanNodeInputDataSize().toString());
                     double filtered = 100.0d * (nodeStats.getPlanNodeInputPositions() - nodeStats.getPlanNodeOutputPositions()) / nodeStats.getPlanNodeInputPositions();
                     nodeOutput.appendDetailsLine(", Filtered: %s%%", formatDouble(filtered));
+                }
+                List<DynamicFilterDomainStats> collectedDomainStats = dynamicFilters.stream()
+                        .map(DynamicFilters.Descriptor::getId)
+                        .map(dynamicFilterDomainStats::get)
+                        .filter(Objects::nonNull)
+                        .collect(toImmutableList());
+                if (!collectedDomainStats.isEmpty()) {
+                    nodeOutput.appendDetailsLine("Dynamic filters: ");
+                    collectedDomainStats.forEach(stats -> nodeOutput.appendDetailsLine(
+                            "    - %s, %s, collection time=%s",
+                            stats.getDynamicFilterId(),
+                            stats.getSimplifiedDomain(),
+                            stats.getCollectionDuration().map(Duration::toString).orElse("uncollected")));
                 }
                 return null;
             }
@@ -906,7 +1142,7 @@ public class PlanPrinter
                     node,
                     name,
                     format("[replicate=%s, unnest=%s", formatOutputs(types, node.getReplicateSymbols()), formatOutputs(types, unnestInputs))
-                            + (node.getFilter().isPresent() ? format(", filter=%s]", node.getFilter().get().toString()) : "]"));
+                            + (node.getFilter().isPresent() ? format(", filter=%s]", node.getFilter().get()) : "]"));
             return processChildren(node, context);
         }
 
@@ -989,6 +1225,14 @@ public class PlanPrinter
             addNode(node, "Except", node.isDistinct() ? " distinct" : " all");
 
             return processChildren(node, context);
+        }
+
+        @Override
+        public Void visitRefreshMaterializedView(RefreshMaterializedViewNode node, Void context)
+        {
+            addNode(node, "RefreshMaterializedView", format("[%s]", node.getViewName()));
+
+            return null;
         }
 
         @Override
@@ -1126,6 +1370,19 @@ public class PlanPrinter
                 nodeOutput.appendDetailsLine("%s := %s", columnName, node.getColumnValueAndRowIdSymbols().get(index).getName());
                 index++;
             }
+            return processChildren(node, context);
+        }
+
+        @Override
+        public Void visitTableExecute(TableExecuteNode node, Void context)
+        {
+            NodeRepresentation nodeOutput = addNode(node, "TableExecute");
+            for (int i = 0; i < node.getColumnNames().size(); i++) {
+                String name = node.getColumnNames().get(i);
+                Symbol symbol = node.getColumns().get(i);
+                nodeOutput.appendDetailsLine("%s := %s", name, symbol);
+            }
+
             return processChildren(node, context);
         }
 
@@ -1408,6 +1665,7 @@ public class PlanPrinter
                         rewritten.getOrderBy(),
                         rewritten.isDistinct(),
                         rewritten.getNullTreatment(),
+                        rewritten.getProcessingMode(),
                         rewritten.getArguments());
             }
         }, expression);

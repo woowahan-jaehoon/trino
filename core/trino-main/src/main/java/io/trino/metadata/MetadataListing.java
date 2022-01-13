@@ -20,10 +20,10 @@ import com.google.common.collect.ImmutableSortedSet;
 import io.trino.Session;
 import io.trino.connector.CatalogName;
 import io.trino.security.AccessControl;
-import io.trino.spi.connector.CatalogSchemaTableName;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnMetadata;
-import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.security.GrantInfo;
 
 import java.util.List;
@@ -37,6 +37,8 @@ import java.util.SortedSet;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.spi.StandardErrorCode.TABLE_REDIRECTION_ERROR;
 
 public final class MetadataListing
 {
@@ -58,12 +60,29 @@ public final class MetadataListing
             catalogNames = ImmutableSortedMap.of(catalogName.get(), catalogHandle.get());
         }
         else {
-            catalogNames = metadata.getCatalogNames(session);
+            catalogNames = metadata.getCatalogs(session).entrySet().stream()
+                    .collect(toImmutableMap(
+                            Map.Entry::getKey,
+                            entry -> entry.getValue().getConnectorCatalogName()));
         }
         Set<String> allowedCatalogs = accessControl.filterCatalogs(session.getIdentity(), catalogNames.keySet());
 
         ImmutableSortedMap.Builder<String, CatalogName> result = ImmutableSortedMap.naturalOrder();
         for (Map.Entry<String, CatalogName> entry : catalogNames.entrySet()) {
+            if (allowedCatalogs.contains(entry.getKey())) {
+                result.put(entry);
+            }
+        }
+        return result.build();
+    }
+
+    public static SortedMap<String, Catalog> getCatalogs(Session session, Metadata metadata, AccessControl accessControl)
+    {
+        Map<String, Catalog> catalogs = metadata.getCatalogs(session);
+        Set<String> allowedCatalogs = accessControl.filterCatalogs(session.getIdentity(), catalogs.keySet());
+
+        ImmutableSortedMap.Builder<String, Catalog> result = ImmutableSortedMap.naturalOrder();
+        for (Map.Entry<String, Catalog> entry : catalogs.entrySet()) {
             if (allowedCatalogs.contains(entry.getKey())) {
                 result.put(entry);
             }
@@ -94,6 +113,10 @@ public final class MetadataListing
         Set<SchemaTableName> tableNames = metadata.listTables(session, prefix).stream()
                 .map(QualifiedObjectName::asSchemaTableName)
                 .collect(toImmutableSet());
+
+        // Table listing operation only involves getting table names, but not any metadata. So redirected tables are not
+        // handled any differently. The target table or catalog are not involved. Thus the following filter is only called
+        // for the source catalog on source table names.
         return accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), tableNames);
     }
 
@@ -105,14 +128,34 @@ public final class MetadataListing
         return accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), tableNames);
     }
 
-    public static Map<SchemaTableName, ConnectorViewDefinition> getViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    public static Map<SchemaTableName, ViewInfo> getViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
-        Map<SchemaTableName, ConnectorViewDefinition> views = metadata.getViews(session, prefix).entrySet().stream()
+        Map<SchemaTableName, ViewInfo> views = metadata.getViews(session, prefix).entrySet().stream()
                 .collect(toImmutableMap(entry -> entry.getKey().asSchemaTableName(), Entry::getValue));
 
         Set<SchemaTableName> accessible = accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), views.keySet());
 
         return views.entrySet().stream()
+                .filter(entry -> accessible.contains(entry.getKey()))
+                .collect(toImmutableMap(Entry::getKey, Entry::getValue));
+    }
+
+    public static Set<SchemaTableName> listMaterializedViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
+        Set<SchemaTableName> tableNames = metadata.listMaterializedViews(session, prefix).stream()
+                .map(QualifiedObjectName::asSchemaTableName)
+                .collect(toImmutableSet());
+        return accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), tableNames);
+    }
+
+    public static Map<SchemaTableName, ViewInfo> getMaterializedViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
+        Map<SchemaTableName, ViewInfo> materializedViews = metadata.getMaterializedViews(session, prefix).entrySet().stream()
+                .collect(toImmutableMap(entry -> entry.getKey().asSchemaTableName(), Entry::getValue));
+
+        Set<SchemaTableName> accessible = accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), materializedViews.keySet());
+
+        return materializedViews.entrySet().stream()
                 .filter(entry -> accessible.contains(entry.getKey()))
                 .collect(toImmutableMap(Entry::getKey, Entry::getValue));
     }
@@ -132,31 +175,76 @@ public final class MetadataListing
 
     public static Map<SchemaTableName, List<ColumnMetadata>> listTableColumns(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
-        Map<SchemaTableName, List<ColumnMetadata>> tableColumns = metadata.listTableColumns(session, prefix).entrySet().stream()
-                .collect(toImmutableMap(entry -> entry.getKey().asSchemaTableName(), Entry::getValue));
+        List<TableColumnsMetadata> catalogColumns = getOnlyElement(metadata.listTableColumns(session, prefix).values(), List.of());
+
+        Map<SchemaTableName, Optional<List<ColumnMetadata>>> tableColumns = catalogColumns.stream()
+                .collect(toImmutableMap(TableColumnsMetadata::getTable, TableColumnsMetadata::getColumns));
+
         Set<SchemaTableName> allowedTables = accessControl.filterTables(
                 session.toSecurityContext(),
                 prefix.getCatalogName(),
                 tableColumns.keySet());
 
         ImmutableMap.Builder<SchemaTableName, List<ColumnMetadata>> result = ImmutableMap.builder();
-        for (Entry<SchemaTableName, List<ColumnMetadata>> entry : tableColumns.entrySet()) {
-            if (!allowedTables.contains(entry.getKey())) {
-                continue;
+
+        tableColumns.forEach((table, columnsOptional) -> {
+            if (!allowedTables.contains(table)) {
+                return;
             }
-            List<ColumnMetadata> columns = entry.getValue();
+
+            QualifiedObjectName originalTableName = new QualifiedObjectName(prefix.getCatalogName(), table.getSchemaName(), table.getTableName());
+            List<ColumnMetadata> columns;
+            Optional<QualifiedObjectName> targetTableName = Optional.empty();
+
+            if (columnsOptional.isPresent()) {
+                columns = columnsOptional.get();
+            }
+            else {
+                TableHandle targetTableHandle = null;
+                boolean redirectionSucceeded = false;
+
+                try {
+                    // For redirected tables, column listing requires special handling, because the column metadata is unavailable
+                    // at the source table, and needs to be fetched from the target table.
+                    RedirectionAwareTableHandle redirection = metadata.getRedirectionAwareTableHandle(session, originalTableName);
+                    targetTableName = redirection.getRedirectedTableName();
+
+                    // The target table name should be non-empty. If it is empty, it means that there is an
+                    // inconsistency in the connector's implementation of ConnectorMetadata#streamTableColumns and
+                    // ConnectorMetadata#redirectTable.
+                    if (targetTableName.isPresent()) {
+                        redirectionSucceeded = true;
+                        targetTableHandle = redirection.getTableHandle().orElseThrow();
+                    }
+                }
+                catch (TrinoException e) {
+                    // Ignore redirection errors
+                    if (!e.getErrorCode().equals(TABLE_REDIRECTION_ERROR.toErrorCode())) {
+                        throw e;
+                    }
+                }
+
+                if (redirectionSucceeded == false) {
+                    return;
+                }
+
+                columns = metadata.getTableMetadata(session, targetTableHandle).getColumns();
+            }
+
             Set<String> allowedColumns = accessControl.filterColumns(
                     session.toSecurityContext(),
-                    new CatalogSchemaTableName(prefix.getCatalogName(), entry.getKey()),
+                    // Use redirected table name for applying column filters, since the source does not know the column metadata
+                    targetTableName.orElse(originalTableName).asCatalogSchemaTableName(),
                     columns.stream()
                             .map(ColumnMetadata::getName)
                             .collect(toImmutableSet()));
             result.put(
-                    entry.getKey(),
+                    table,
                     columns.stream()
                             .filter(column -> allowedColumns.contains(column.getName()))
                             .collect(toImmutableList()));
-        }
+        });
+
         return result.build();
     }
 }

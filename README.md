@@ -14,22 +14,27 @@
    <a href="https://trino.io/slack.html">
        <img src="https://img.shields.io/static/v1?logo=slack&logoColor=959DA5&label=Slack&labelColor=333a41&message=join%20conversation&color=3AC358" alt="Trino Slack" />
    </a>
-   <a href="https://trino.io/presto-the-definitive-guide.html">
-       <img src="https://img.shields.io/badge/Presto%3A%20The%20Definitive%20Guide-download-brightgreen" alt="Presto: The Definitive Guide book download" />
+   <a href="https://trino.io/trino-the-definitive-guide.html">
+       <img src="https://img.shields.io/badge/Trino%3A%20The%20Definitive%20Guide-download-brightgreen" alt="Trino: The Definitive Guide book download" />
    </a>
 </p>
 
 ## Development
 
-See [DEVELOPMENT](DEVELOPMENT.md) for information about code style,
+See [DEVELOPMENT](.github/DEVELOPMENT.md) for information about code style,
 development process, and guidelines.
 
-See [CONTRIBUTING](CONTRIBUTING.md) for contribution requirements.
+See [CONTRIBUTING](.github/CONTRIBUTING.md) for contribution requirements.
+
+## Security
+
+See the project [security policy](.github/SECURITY.md) for
+information about reporting vulnerabilities.
 
 ## Build requirements
 
 * Mac OS X or Linux
-* Java 11.0.7+, 64-bit
+* Java 11.0.11+, 64-bit
 * Docker
 
 ## Building Trino
@@ -86,6 +91,9 @@ development. Use the following options to create a run configuration:
 
 The working directory should be the `trino-server-dev` subdirectory. In
 IntelliJ, using `$MODULE_DIR$` accomplishes this automatically.
+
+If `VM options` doesn't exist in the dialog, you need to select `Modify options`
+and enable `Add VM options`.
 
 ### Running the CLI
 

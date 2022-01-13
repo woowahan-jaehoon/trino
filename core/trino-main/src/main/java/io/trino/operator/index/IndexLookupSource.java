@@ -13,7 +13,7 @@
  */
 package io.trino.operator.index;
 
-import io.trino.operator.LookupSource;
+import io.trino.operator.join.LookupSource;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 
@@ -41,12 +41,6 @@ public class IndexLookupSource
     {
         // since the data is not loaded, we don't know if it is empty
         return false;
-    }
-
-    @Override
-    public int getChannelCount()
-    {
-        return indexLoader.getChannelCount();
     }
 
     @Override

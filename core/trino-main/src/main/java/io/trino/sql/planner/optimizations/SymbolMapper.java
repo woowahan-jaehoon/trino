@@ -25,16 +25,24 @@ import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 import io.trino.sql.planner.plan.DistinctLimitNode;
 import io.trino.sql.planner.plan.GroupIdNode;
 import io.trino.sql.planner.plan.LimitNode;
+import io.trino.sql.planner.plan.PatternRecognitionNode;
+import io.trino.sql.planner.plan.PatternRecognitionNode.Measure;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.StatisticAggregations;
 import io.trino.sql.planner.plan.StatisticsWriterNode;
+import io.trino.sql.planner.plan.TableExecuteNode;
 import io.trino.sql.planner.plan.TableFinishNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
 import io.trino.sql.planner.plan.WindowNode;
+import io.trino.sql.planner.rowpattern.AggregationValuePointer;
+import io.trino.sql.planner.rowpattern.LogicalIndexExtractor.ExpressionAndValuePointers;
+import io.trino.sql.planner.rowpattern.ScalarValuePointer;
+import io.trino.sql.planner.rowpattern.ValuePointer;
+import io.trino.sql.planner.rowpattern.ir.IrLabel;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.ExpressionRewriter;
 import io.trino.sql.tree.ExpressionTreeRewriter;
@@ -58,7 +66,7 @@ public class SymbolMapper
 {
     private final Function<Symbol, Symbol> mappingFunction;
 
-    private SymbolMapper(Function<Symbol, Symbol> mappingFunction)
+    public SymbolMapper(Function<Symbol, Symbol> mappingFunction)
     {
         this.mappingFunction = requireNonNull(mappingFunction, "mappingFunction is null");
     }
@@ -236,6 +244,99 @@ public class SymbolMapper
                 specification.getOrderingScheme().map(this::map));
     }
 
+    public PatternRecognitionNode map(PatternRecognitionNode node, PlanNode source)
+    {
+        ImmutableMap.Builder<Symbol, WindowNode.Function> newFunctions = ImmutableMap.builder();
+        node.getWindowFunctions().forEach((symbol, function) -> {
+            List<Expression> newArguments = function.getArguments().stream()
+                    .map(this::map)
+                    .collect(toImmutableList());
+            WindowNode.Frame newFrame = map(function.getFrame());
+
+            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, newFrame, function.isIgnoreNulls()));
+        });
+
+        ImmutableMap.Builder<Symbol, Measure> newMeasures = ImmutableMap.builder();
+        node.getMeasures().forEach((symbol, measure) -> {
+            ExpressionAndValuePointers newExpression = map(measure.getExpressionAndValuePointers());
+            newMeasures.put(map(symbol), new Measure(newExpression, measure.getType()));
+        });
+
+        ImmutableMap.Builder<IrLabel, ExpressionAndValuePointers> newVariableDefinitions = ImmutableMap.builder();
+        node.getVariableDefinitions().forEach((label, expression) -> newVariableDefinitions.put(label, map(expression)));
+
+        return new PatternRecognitionNode(
+                node.getId(),
+                source,
+                mapAndDistinct(node.getSpecification()),
+                node.getHashSymbol().map(this::map),
+                node.getPrePartitionedInputs().stream()
+                        .map(this::map)
+                        .collect(toImmutableSet()),
+                node.getPreSortedOrderPrefix(),
+                newFunctions.build(),
+                newMeasures.build(),
+                node.getCommonBaseFrame().map(this::map),
+                node.getRowsPerMatch(),
+                node.getSkipToLabel(),
+                node.getSkipToPosition(),
+                node.isInitial(),
+                node.getPattern(),
+                node.getSubsets(),
+                newVariableDefinitions.build());
+    }
+
+    private ExpressionAndValuePointers map(ExpressionAndValuePointers expressionAndValuePointers)
+    {
+        // Map only the input symbols of ValuePointers. These are the symbols produced by the source node.
+        // Other symbols present in the ExpressionAndValuePointers structure are synthetic unique symbols
+        // with no outer usage or dependencies.
+        ImmutableList.Builder<ValuePointer> newValuePointers = ImmutableList.builder();
+        for (ValuePointer valuePointer : expressionAndValuePointers.getValuePointers()) {
+            if (valuePointer instanceof ScalarValuePointer) {
+                ScalarValuePointer scalarValuePointer = (ScalarValuePointer) valuePointer;
+                Symbol inputSymbol = scalarValuePointer.getInputSymbol();
+                if (expressionAndValuePointers.getClassifierSymbols().contains(inputSymbol) || expressionAndValuePointers.getMatchNumberSymbols().contains(inputSymbol)) {
+                    newValuePointers.add(scalarValuePointer);
+                }
+                else {
+                    newValuePointers.add(new ScalarValuePointer(scalarValuePointer.getLogicalIndexPointer(), map(inputSymbol)));
+                }
+            }
+            else {
+                AggregationValuePointer aggregationValuePointer = (AggregationValuePointer) valuePointer;
+
+                List<Expression> newArguments = aggregationValuePointer.getArguments().stream()
+                        .map(expression -> ExpressionTreeRewriter.rewriteWith(new ExpressionRewriter<Void>()
+                        {
+                            @Override
+                            public Expression rewriteSymbolReference(SymbolReference node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+                            {
+                                if (Symbol.from(node).equals(aggregationValuePointer.getClassifierSymbol()) || Symbol.from(node).equals(aggregationValuePointer.getMatchNumberSymbol())) {
+                                    return node;
+                                }
+                                return map(node);
+                            }
+                        }, expression))
+                        .collect(toImmutableList());
+
+                newValuePointers.add(new AggregationValuePointer(
+                        aggregationValuePointer.getFunction(),
+                        aggregationValuePointer.getSetDescriptor(),
+                        newArguments,
+                        aggregationValuePointer.getClassifierSymbol(),
+                        aggregationValuePointer.getMatchNumberSymbol()));
+            }
+        }
+
+        return new ExpressionAndValuePointers(
+                expressionAndValuePointers.getExpression(),
+                expressionAndValuePointers.getLayout(),
+                newValuePointers.build(),
+                expressionAndValuePointers.getClassifierSymbols(),
+                expressionAndValuePointers.getMatchNumberSymbols());
+    }
+
     public LimitNode map(LimitNode node, PlanNode source)
     {
         return new LimitNode(
@@ -243,7 +344,10 @@ public class SymbolMapper
                 source,
                 node.getCount(),
                 node.getTiesResolvingScheme().map(this::map),
-                node.isPartial());
+                node.isPartial(),
+                node.getPreSortedInputs().stream()
+                        .map(this::map)
+                        .collect(toImmutableList()));
     }
 
     public OrderingScheme map(OrderingScheme orderingScheme)
@@ -304,6 +408,26 @@ public class SymbolMapper
                 node.getPreferredPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())),
                 node.getStatisticsAggregation().map(this::map),
                 node.getStatisticsAggregationDescriptor().map(descriptor -> descriptor.map(this::map)));
+    }
+
+    public TableExecuteNode map(TableExecuteNode node, PlanNode source)
+    {
+        return map(node, source, node.getId());
+    }
+
+    public TableExecuteNode map(TableExecuteNode node, PlanNode source, PlanNodeId newId)
+    {
+        // Intentionally does not use mapAndDistinct on columns as that would remove columns
+        return new TableExecuteNode(
+                newId,
+                source,
+                node.getTarget(),
+                map(node.getRowCountSymbol()),
+                map(node.getFragmentSymbol()),
+                map(node.getColumns()),
+                node.getColumnNames(),
+                node.getPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())),
+                node.getPreferredPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())));
     }
 
     public PartitioningScheme map(PartitioningScheme scheme, List<Symbol> sourceLayout)

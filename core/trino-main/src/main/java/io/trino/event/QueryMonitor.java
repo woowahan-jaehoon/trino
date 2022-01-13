@@ -190,6 +190,7 @@ public class QueryMonitor
                         0,
                         0,
                         0,
+                        0,
                         ImmutableList.of(),
                         0,
                         true,
@@ -276,6 +277,7 @@ public class QueryMonitor
                 queryStats.getLogicalWrittenDataSize().toBytes(),
                 queryStats.getWrittenPositions(),
                 queryStats.getCumulativeUserMemory(),
+                queryStats.getCumulativeSystemMemory(),
                 queryStats.getStageGcStatistics(),
                 queryStats.getCompletedDrivers(),
                 queryInfo.isCompleteInfo(),
@@ -314,6 +316,7 @@ public class QueryMonitor
             if (queryInfo.getOutputStage().isPresent()) {
                 return Optional.of(textDistributedPlan(
                         queryInfo.getOutputStage().get(),
+                        queryInfo.getQueryStats(),
                         new ValuePrinter(metadata, queryInfo.getSession().toSession(sessionPropertyManager)),
                         false));
             }
@@ -370,6 +373,7 @@ public class QueryMonitor
                     .map(columns -> columns.stream()
                             .map(column -> new OutputColumnMetadata(
                                     column.getColumn().getName(),
+                                    column.getColumn().getType(),
                                     column.getSourceColumns().stream()
                                             .map(Analysis.SourceColumn::getColumnDetail)
                                             .collect(toImmutableSet())))

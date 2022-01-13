@@ -14,7 +14,9 @@
 package io.trino.plugin.hive.orc;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.io.Closer;
 import io.trino.memory.context.AggregatedMemoryContext;
+import io.trino.memory.context.LocalMemoryContext;
 import io.trino.orc.OrcCorruptionException;
 import io.trino.orc.OrcDataSource;
 import io.trino.orc.OrcDataSourceId;
@@ -70,11 +72,16 @@ public class OrcPageSource
     private boolean closed;
 
     private final AggregatedMemoryContext systemMemoryContext;
+    private final LocalMemoryContext localMemoryContext;
 
     private final FileFormatDataSourceStats stats;
 
     // Row ID relative to all the original files of the same bucket ID before this file in lexicographic order
     private Optional<Long> originalFileRowId = Optional.empty();
+
+    private long completedPositions;
+
+    private Optional<Page> outstandingPage = Optional.empty();
 
     public OrcPageSource(
             OrcRecordReader recordReader,
@@ -91,6 +98,7 @@ public class OrcPageSource
         this.deletedRows = requireNonNull(deletedRows, "deletedRows is null");
         this.stats = requireNonNull(stats, "stats is null");
         this.systemMemoryContext = requireNonNull(systemMemoryContext, "systemMemoryContext is null");
+        this.localMemoryContext = systemMemoryContext.newLocalMemoryContext(OrcPageSource.class.getSimpleName());
         this.originalFileRowId = requireNonNull(originalFileRowId, "originalFileRowId is null");
     }
 
@@ -98,6 +106,12 @@ public class OrcPageSource
     public long getCompletedBytes()
     {
         return orcDataSource.getReadBytes();
+    }
+
+    @Override
+    public OptionalLong getCompletedPositions()
+    {
+        return OptionalLong.of(completedPositions);
     }
 
     @Override
@@ -122,7 +136,18 @@ public class OrcPageSource
     {
         Page page;
         try {
-            page = recordReader.nextPage();
+            if (outstandingPage.isPresent()) {
+                page = outstandingPage.get();
+                outstandingPage = Optional.empty();
+                // Mark no bytes consumed by outstandingPage.
+                // We can reset it again below if deletedRows loading yields again.
+                // In such case the brief period when it is set to 0 will not be observed externally as
+                // page source memory usage is only read by engine after call to getNextPage completes.
+                localMemoryContext.setBytes(0);
+            }
+            else {
+                page = recordReader.nextPage();
+            }
         }
         catch (IOException | RuntimeException e) {
             closeWithSuppression(e);
@@ -134,15 +159,31 @@ public class OrcPageSource
             return null;
         }
 
+        completedPositions += page.getPositionCount();
+
         OptionalLong startRowId = originalFileRowId.isPresent() ?
                 OptionalLong.of(originalFileRowId.get() + recordReader.getFilePosition()) : OptionalLong.empty();
+
+        if (deletedRows.isPresent()) {
+            boolean deletedRowsYielded = !deletedRows.get().loadOrYield();
+            if (deletedRowsYielded) {
+                outstandingPage = Optional.of(page);
+                localMemoryContext.setBytes(page.getRetainedSizeInBytes());
+                return null; // return control to engine so it can update memory usage for query
+            }
+        }
 
         MaskDeletedRowsFunction maskDeletedRowsFunction = deletedRows
                 .map(deletedRows -> deletedRows.getMaskDeletedRowsFunction(page, startRowId))
                 .orElseGet(() -> MaskDeletedRowsFunction.noMaskForPage(page));
+        return getColumnAdaptationsPage(page, maskDeletedRowsFunction, recordReader.getFilePosition());
+    }
+
+    private Page getColumnAdaptationsPage(Page page, MaskDeletedRowsFunction maskDeletedRowsFunction, long filePosition)
+    {
         Block[] blocks = new Block[columnAdaptations.size()];
         for (int i = 0; i < columnAdaptations.size(); i++) {
-            blocks[i] = columnAdaptations.get(i).block(page, maskDeletedRowsFunction, recordReader.getFilePosition());
+            blocks[i] = columnAdaptations.get(i).block(page, maskDeletedRowsFunction, filePosition);
         }
         return new Page(maskDeletedRowsFunction.getPositionCount(), blocks);
     }
@@ -167,9 +208,21 @@ public class OrcPageSource
         }
         closed = true;
 
-        try {
+        Closer closer = Closer.create();
+
+        closer.register(() -> {
             stats.addMaxCombinedBytesPerRow(recordReader.getMaxCombinedBytesPerRow());
             recordReader.close();
+        });
+
+        closer.register(() -> {
+            if (deletedRows.isPresent()) {
+                deletedRows.get().close();
+            }
+        });
+
+        try {
+            closer.close();
         }
         catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -227,6 +280,11 @@ public class OrcPageSource
         static ColumnAdaptation originalFileRowIdColumn(long startingRowId, int bucketId)
         {
             return new OriginalFileRowIdAdaptation(startingRowId, bucketId);
+        }
+
+        static ColumnAdaptation updatedRowColumnsWithOriginalFiles(long startingRowId, int bucketId, HiveUpdateProcessor updateProcessor, List<HiveColumnHandle> dependencyColumns)
+        {
+            return new UpdatedRowAdaptationWithOriginalFiles(startingRowId, bucketId, updateProcessor, dependencyColumns);
         }
 
         static ColumnAdaptation updatedRowColumns(HiveUpdateProcessor updateProcessor, List<HiveColumnHandle> dependencyColumns)
@@ -328,8 +386,8 @@ public class OrcPageSource
                     Optional.empty(),
                     new Block[] {
                             sourcePage.getBlock(ORIGINAL_TRANSACTION_CHANNEL),
-                            sourcePage.getBlock(ROW_ID_CHANNEL),
                             sourcePage.getBlock(BUCKET_CHANNEL),
+                            sourcePage.getBlock(ROW_ID_CHANNEL),
                     }));
             return rowBlock;
         }
@@ -359,6 +417,46 @@ public class OrcPageSource
         }
     }
 
+    /**
+     * This ColumnAdaptation creates a RowBlock column containing the three
+     * ACID columms derived from the startingRowId and bucketId, and a special
+     * original files transaction block, plus a block containing
+     * all the columns not changed by the UPDATE statement.
+     */
+    private static final class UpdatedRowAdaptationWithOriginalFiles
+            implements ColumnAdaptation
+    {
+        private final long startingRowId;
+        private final Block bucketBlock;
+        private final HiveUpdateProcessor updateProcessor;
+        private final List<Integer> nonUpdatedSourceChannels;
+
+        public UpdatedRowAdaptationWithOriginalFiles(long startingRowId, int bucketId, HiveUpdateProcessor updateProcessor, List<HiveColumnHandle> dependencyColumns)
+        {
+            this.startingRowId = startingRowId;
+            this.bucketBlock = nativeValueToBlock(INTEGER, Long.valueOf(computeBucketValue(bucketId, 0)));
+            this.updateProcessor = requireNonNull(updateProcessor, "updateProcessor is null");
+            requireNonNull(dependencyColumns, "dependencyColumns is null");
+            this.nonUpdatedSourceChannels = updateProcessor.makeNonUpdatedSourceChannels(dependencyColumns);
+        }
+
+        @Override
+        public Block block(Page sourcePage, MaskDeletedRowsFunction maskDeletedRowsFunction, long filePosition)
+        {
+            int positionCount = sourcePage.getPositionCount();
+            ImmutableList.Builder<Block> originalFilesBlockBuilder = ImmutableList.builder();
+            originalFilesBlockBuilder.add(
+                    new RunLengthEncodedBlock(ORIGINAL_FILE_TRANSACTION_ID_BLOCK, positionCount),
+                    new RunLengthEncodedBlock(bucketBlock, positionCount),
+                    createOriginalFilesRowIdBlock(startingRowId, filePosition, positionCount));
+            for (int channel = 0; channel < sourcePage.getChannelCount(); channel++) {
+                originalFilesBlockBuilder.add(sourcePage.getBlock(channel));
+            }
+            Page page = new Page(originalFilesBlockBuilder.build().toArray(new Block[]{}));
+            return updateProcessor.createUpdateRowBlock(page, nonUpdatedSourceChannels, maskDeletedRowsFunction);
+        }
+    }
+
     private static class OriginalFileRowIdAdaptation
             implements ColumnAdaptation
     {
@@ -380,19 +478,19 @@ public class OrcPageSource
                     Optional.empty(),
                     new Block[] {
                             new RunLengthEncodedBlock(ORIGINAL_FILE_TRANSACTION_ID_BLOCK, positionCount),
-                            createRowIdBlock(filePosition, positionCount),
-                            new RunLengthEncodedBlock(bucketBlock, positionCount)
+                            new RunLengthEncodedBlock(bucketBlock, positionCount),
+                            createOriginalFilesRowIdBlock(startingRowId, filePosition, positionCount)
                     }));
             return rowBlock;
         }
+    }
 
-        private Block createRowIdBlock(long filePosition, int positionCount)
-        {
-            long[] translatedRowIds = new long[positionCount];
-            for (int index = 0; index < positionCount; index++) {
-                translatedRowIds[index] = filePosition + startingRowId + index;
-            }
-            return new LongArrayBlock(positionCount, Optional.empty(), translatedRowIds);
+    private static Block createOriginalFilesRowIdBlock(long startingRowId, long filePosition, int positionCount)
+    {
+        long[] translatedRowIds = new long[positionCount];
+        for (int index = 0; index < positionCount; index++) {
+            translatedRowIds[index] = startingRowId + filePosition + index;
         }
+        return new LongArrayBlock(positionCount, Optional.empty(), translatedRowIds);
     }
 }

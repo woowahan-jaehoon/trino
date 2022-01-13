@@ -14,8 +14,6 @@
 package io.trino.plugin.iceberg;
 
 import io.airlift.json.JsonCodec;
-import io.trino.plugin.hive.HdfsEnvironment;
-import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.spi.type.TypeManager;
 
 import javax.inject.Inject;
@@ -24,36 +22,23 @@ import static java.util.Objects.requireNonNull;
 
 public class IcebergMetadataFactory
 {
-    private final HiveMetastore metastore;
-    private final HdfsEnvironment hdfsEnvironment;
     private final TypeManager typeManager;
     private final JsonCodec<CommitTaskData> commitTaskCodec;
+    private final TrinoCatalogFactory catalogFactory;
 
     @Inject
     public IcebergMetadataFactory(
-            IcebergConfig config,
-            HiveMetastore metastore,
-            HdfsEnvironment hdfsEnvironment,
             TypeManager typeManager,
-            JsonCodec<CommitTaskData> commitTaskDataJsonCodec)
+            JsonCodec<CommitTaskData> commitTaskCodec,
+            TrinoCatalogFactory catalogFactory)
     {
-        this(metastore, hdfsEnvironment, typeManager, commitTaskDataJsonCodec);
-    }
-
-    public IcebergMetadataFactory(
-            HiveMetastore metastore,
-            HdfsEnvironment hdfsEnvironment,
-            TypeManager typeManager,
-            JsonCodec<CommitTaskData> commitTaskCodec)
-    {
-        this.metastore = requireNonNull(metastore, "metastore is null");
-        this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.commitTaskCodec = requireNonNull(commitTaskCodec, "commitTaskCodec is null");
+        this.catalogFactory = requireNonNull(catalogFactory, "catalogFactory is null");
     }
 
     public IcebergMetadata create()
     {
-        return new IcebergMetadata(metastore, hdfsEnvironment, typeManager, commitTaskCodec);
+        return new IcebergMetadata(typeManager, commitTaskCodec, catalogFactory.create());
     }
 }

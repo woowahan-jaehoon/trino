@@ -24,12 +24,12 @@ import io.trino.tests.tpch.TpchQueryRunnerBuilder;
 import org.intellij.lang.annotations.Language;
 import org.testng.annotations.Test;
 
+import static io.trino.FeaturesConfig.JoinDistributionType.BROADCAST;
+import static io.trino.FeaturesConfig.JoinReorderingStrategy.NONE;
 import static io.trino.SystemSessionProperties.FILTERING_SEMI_JOIN_TO_INNER;
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
 import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
 import static io.trino.SystemSessionProperties.LATE_MATERIALIZATION;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType.BROADCAST;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.NONE;
 import static io.trino.testing.QueryAssertions.assertEqualsIgnoreOrder;
 import static org.testng.Assert.assertTrue;
 
@@ -106,14 +106,14 @@ public class TestLateMaterializationQueries
 
     private Session lateMaterialization()
     {
-        return Session.builder(getQueryRunner().getDefaultSession())
+        return Session.builder(getSession())
                 .setSystemProperty(LATE_MATERIALIZATION, "true")
                 .build();
     }
 
     private Session noLateMaterialization()
     {
-        return Session.builder(getQueryRunner().getDefaultSession())
+        return Session.builder(getSession())
                 .setSystemProperty(LATE_MATERIALIZATION, "false")
                 .build();
     }

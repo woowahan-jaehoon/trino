@@ -31,6 +31,7 @@ import io.trino.execution.scheduler.NodeSelectorFactory;
 import io.trino.execution.scheduler.TopologyAwareNodeSelectorConfig;
 import io.trino.execution.scheduler.TopologyAwareNodeSelectorFactory;
 import io.trino.execution.scheduler.UniformNodeSelectorFactory;
+import io.trino.jmh.Benchmarks;
 import io.trino.metadata.InMemoryNodeManager;
 import io.trino.metadata.InternalNode;
 import io.trino.metadata.Split;
@@ -52,10 +53,6 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.net.URI;
 import java.util.ArrayList;
@@ -159,7 +156,7 @@ public class BenchmarkNodeScheduler
                 for (int j = 0; j < MAX_SPLITS_PER_NODE + MAX_PENDING_SPLITS_PER_TASK_PER_NODE; j++) {
                     initialSplits.add(new Split(CONNECTOR_ID, new TestSplitRemote(i), Lifespan.taskWide()));
                 }
-                TaskId taskId = new TaskId("test", 1, i);
+                TaskId taskId = new TaskId(new StageId("test", 1), i, 0);
                 MockRemoteTaskFactory.MockRemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, initialSplits.build(), nodeTaskMap.createPartitionedSplitCountTracker(node, taskId));
                 nodeTaskMap.addTask(node, remoteTask);
                 taskMap.put(node, remoteTask);
@@ -227,11 +224,7 @@ public class BenchmarkNodeScheduler
     public static void main(String[] args)
             throws Exception
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkNodeScheduler.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        Benchmarks.benchmark(BenchmarkNodeScheduler.class).run();
     }
 
     private static class BenchmarkNetworkTopology
